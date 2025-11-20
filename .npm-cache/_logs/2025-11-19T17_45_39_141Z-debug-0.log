@@ -1,0 +1,20 @@
+0 verbose cli /usr/bin/node /usr/lib/node_modules/pm2/lib/ProcessContainerFork.js
+1 info using npm@10.8.2
+2 info using node@v20.19.5
+3 silly config load:file:/usr/lib/node_modules/npm/npmrc
+4 silly config load:file:/root/ibiki-sms/.npmrc
+5 error config prefix cannot be changed from project config: /root/ibiki-sms/.npmrc.
+6 silly config load:file:/root/.npmrc
+7 silly config load:file:/root/ibiki-sms/.npm-global/etc/npmrc
+8 verbose title npm start
+9 verbose argv "start"
+10 verbose logfile logs-max:10 dir:/root/ibiki-sms/.npm-cache/_logs/2025-11-19T17_45_39_141Z-
+11 verbose logfile /root/ibiki-sms/.npm-cache/_logs/2025-11-19T17_45_39_141Z-debug-0.log
+12 silly logfile start cleaning logs, removing 1 files
+13 silly logfile done cleaning log files
+14 verbose cwd /root/ibiki-sms
+15 verbose os Linux 5.15.0-161-generic
+16 verbose node v20.19.5
+17 verbose npm  v10.8.2
+18 verbose exit 1
+19 verbose code 1
