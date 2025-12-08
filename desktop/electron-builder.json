@@ -1,0 +1,13 @@
+﻿{
+  "win": {
+    "target": [
+      {
+        "target": "portable",
+        "arch": ["x64"]
+      }
+    ],
+    "signingHashAlgorithms": null,
+    "signAndEditExecutable": false,
+    "signDlls": false
+  }
+}

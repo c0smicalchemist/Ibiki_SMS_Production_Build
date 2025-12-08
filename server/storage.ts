@@ -1871,6 +1871,10 @@ export class DbStorage implements IStorage {
   }
 }
 
+export function getDbPool(): Pool | null {
+  return poolInstance;
+}
+
 // Lazy initialization to ensure environment variables are loaded
 let storageInstance: IStorage | null = null;
 

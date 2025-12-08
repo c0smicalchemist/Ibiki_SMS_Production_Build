@@ -1,0 +1,16 @@
+﻿appId: com.ibiki.sms
+productName: Ibiki SMS
+directories:
+  output: release
+files:
+  - src/**/*
+  - build/**/*
+extraResources:
+  - from: ../dist/public
+    to: public
+win:
+  target:
+    - target: portable
+      arch:
+        - x64
+  icon: build/icon.ico

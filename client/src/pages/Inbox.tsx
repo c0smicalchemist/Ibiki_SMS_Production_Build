@@ -456,7 +456,7 @@ export default function Inbox() {
                       .sort((a: any[], b: any[]) => {
                         const favA = favorites.includes(String(a[0])) ? 1 : 0;
                         const favB = favorites.includes(String(b[0])) ? 1 : 0;
-                        if (favA !== favB) return favB - favA; // pin favourites on top
+                        if (favA !== favB) return favB - favA;
                         const msgsA = a[1] as any[];
                         const msgsB = b[1] as any[];
                         const ta = new Date(((msgsA.slice().sort((x:any,y:any)=>new Date((y.timestamp||y.createdAt)).getTime()-new Date((x.timestamp||x.createdAt)).getTime()))[0]||{}).timestamp || ((msgsA[0]||{}).createdAt||0)).getTime();
@@ -464,28 +464,26 @@ export default function Inbox() {
                         return sortOrder === 'newest' ? (tb - ta) : (ta - tb);
                       })
                       .map(([phone, msgs]: any[]) => {
-                      const latest = (msgs as any[]).slice().sort((a: any, b: any) => new Date((b.timestamp||b.createdAt)).getTime() - new Date((a.timestamp||a.createdAt)).getTime())[0];
-                      const dt = new Date((latest as any).timestamp || (latest as any).createdAt);
-                      const hasUnread = (msgs as any[]).some((m: any) => !m.isRead);
-                      const lastInboundTs = new Date(((latest as any).timestamp || (latest as any).createdAt)).getTime();
-                      const pendingReply = lastInboundTs > (lastOutByPhone[String(phone)] || 0);
-                      return (
-                        <div key={phone} className={`p-3 border-b cursor-pointer ${selectedPhoneNumber === phone ? 'bg-muted' : ''}`} onClick={() => setSelectedPhoneNumber(phone)}>
-                          <div className="text-sm font-semibold flex items-center gap-2">
-                            {t('inbox.from')}: <span className="font-mono">{String(phone)}</span>
-                            {hasUnread && <span className="inline-block w-2 h-2 rounded-full bg-blue-600" title="Unread" />}
-                            {/* pending reply indicator removed per request */}
+                        const latest = (msgs as any[]).slice().sort((a: any, b: any) => new Date((b.timestamp||b.createdAt)).getTime() - new Date((a.timestamp||a.createdAt)).getTime())[0];
+                        const dt = new Date((latest as any).timestamp || (latest as any).createdAt);
+                        const hasUnread = (msgs as any[]).some((m: any) => !m.isRead);
+                        const lastInboundTs = new Date(((latest as any).timestamp || (latest as any).createdAt)).getTime();
+                        const pendingReply = lastInboundTs > (lastOutByPhone[String(phone)] || 0);
+                        return (
+                          <div key={phone} className={`p-3 border-b cursor-pointer ${selectedPhoneNumber === phone ? 'bg-muted' : ''}`} onClick={() => setSelectedPhoneNumber(phone)}>
+                            <div className="text-sm font-semibold flex items-center gap-2">
+                              {t('inbox.from')}: <span className="font-mono">{String(phone)}</span>
+                              {hasUnread && <span className="inline-block w-2 h-2 rounded-full bg-blue-600" title="Unread" />}
+                            </div>
+                            <div className="text-xs text-muted-foreground">{t('inbox.to')}: {(latest as any).receiver}</div>
+                            <div className="text-xs truncate mt-1">{(latest as any).message}</div>
+                            <div className="text-xs mt-1">{format(dt, 'yyyy-MM-dd HH:mm')}</div>
                           </div>
-                          <div className="text-xs text-muted-foreground">{t('inbox.to')}: {(latest as any).receiver}</div>
-                          <div className="text-xs truncate mt-1">{(latest as any).message}</div>
-                          <div className="text-xs mt-1">{format(dt, 'yyyy-MM-dd HH:mm')}</div>
-                        </div>
-                      );
-                    })
-                    }
-                    {isFetching && (
-                      <div className="text-center py-2 text-xs text-muted-foreground">{t('inbox.loading')}</div>
-                    )}
+                        );
+                      })}
+                  {isFetching && (
+                    <div className="text-center py-2 text-xs text-muted-foreground">{t('inbox.loading')}</div>
+                  )}
                   </div>
                 </CardContent>
               </Card>

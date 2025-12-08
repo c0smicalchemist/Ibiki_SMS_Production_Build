@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import express from "express";
-import { storage } from "./storage";
+import { storage, getDbPool } from "./storage";
 import { type User, insertContactSchema, insertContactGroupSchema } from "@shared/schema";
 import { z } from "zod";
 import bcrypt from "bcryptjs";
@@ -329,6 +329,21 @@ async function getExtremeSMSCredentials() {
 export async function registerRoutes(app: Express): Promise<Server> {
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
+
+  let inboxIndexesEnsured = false;
+  async function ensureInboxIndexes() {
+    if (inboxIndexesEnsured) return;
+    try {
+      const pool = getDbPool();
+      if (!pool) return;
+      await pool.query("CREATE INDEX IF NOT EXISTS incoming_messages_from_digits_idx ON incoming_messages ((regexp_replace(\"from\", '[^0-9]', '', 'g'))) ");
+      await pool.query("CREATE INDEX IF NOT EXISTS incoming_messages_receiver_digits_idx ON incoming_messages ((regexp_replace(receiver, '[^0-9]', '', 'g'))) ");
+      await pool.query("CREATE INDEX IF NOT EXISTS incoming_messages_is_deleted_idx ON incoming_messages(is_deleted)").catch(()=>{});
+      await pool.query("CREATE INDEX IF NOT EXISTS message_logs_user_created_idx ON message_logs(user_id, created_at DESC)").catch(()=>{});
+      inboxIndexesEnsured = true;
+    } catch {}
+  }
+  ensureInboxIndexes().catch(()=>{});
 
   // Paraphrase endpoint (Ibiki Phraser) - simple stub generator for MVP
   app.post('/api/tools/paraphrase', authenticateToken, async (req: any, res) => {
@@ -1864,7 +1879,7 @@ app.get('/api/admin/diagnostics/run', authenticateToken, requireRole(['admin','s
   // Admin/Supervisor: Get message logs for a specific client
   app.get("/api/admin/messages", authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
     try {
-      const { userId } = req.query as { userId?: string };
+      const { userId, cursor } = req.query as { userId?: string; cursor?: string };
       if (!userId) return res.status(400).json({ error: "userId is required" });
       const relaxed = String(process.env.SUPERVISOR_RELAXED || 'true') !== 'false';
       if (req.user.role === 'supervisor' && !relaxed) {
@@ -1875,9 +1890,24 @@ app.get('/api/admin/diagnostics/run', authenticateToken, requireRole(['admin','s
         }
       }
       const limit = await resolveFetchLimit(String(userId), 'client', req.query.limit as string | undefined);
-      const logs = await storage.getMessageLogsByUserId(String(userId), limit);
+      let logs: any[] = [];
+      if (cursor) {
+        const pool = getDbPool();
+        if (!pool) throw new Error('Database not connected');
+        const t0 = Date.now();
+        const r = await pool.query(
+          `SELECT * FROM message_logs WHERE user_id=$1 AND created_at < $2 ORDER BY created_at DESC LIMIT $3`,
+          [String(userId), new Date(String(cursor)), limit]
+        );
+        const dur = Date.now() - t0;
+        try { res.set('Server-Timing', `db;dur=${dur}`); } catch {}
+        logs = r.rows;
+      } else {
+        logs = await storage.getMessageLogsByUserId(String(userId), limit) as any[];
+      }
       try { res.set('Cache-Control','no-store'); } catch {}
-      const payloadObj = { success: true, messages: logs, count: logs.length, limit };
+      const nextCursor = logs.length > 0 ? logs[logs.length - 1].created_at || logs[logs.length - 1].createdAt || null : null;
+      const payloadObj = { success: true, messages: logs, count: logs.length, limit, nextCursor };
       try { console.log("/api/admin/messages payload bytes:", Buffer.byteLength(JSON.stringify(payloadObj))); } catch {}
       try { res.set('Connection','close'); res.type('application/json'); } catch {}
       return res.send(JSON.stringify(payloadObj));
@@ -1890,7 +1920,7 @@ app.get('/api/admin/diagnostics/run', authenticateToken, requireRole(['admin','s
   // Supervisor: Get message logs for a client in same group
   app.get("/api/supervisor/messages", authenticateToken, requireRole(['supervisor']), async (req: any, res) => {
     try {
-      const { userId } = req.query as { userId?: string };
+      const { userId, cursor } = req.query as { userId?: string; cursor?: string };
       if (!userId) return res.status(400).json({ error: "userId is required" });
       const relaxed = String(process.env.SUPERVISOR_RELAXED || 'true') !== 'false';
       if (!relaxed) {
@@ -1901,9 +1931,24 @@ app.get('/api/admin/diagnostics/run', authenticateToken, requireRole(['admin','s
         }
       }
       const limit = await resolveFetchLimit(String(userId), 'client', req.query.limit as string | undefined);
-      const logs = await storage.getMessageLogsByUserId(String(userId), limit);
+      let logs: any[] = [];
+      if (cursor) {
+        const pool = getDbPool();
+        if (!pool) throw new Error('Database not connected');
+        const t0 = Date.now();
+        const r = await pool.query(
+          `SELECT * FROM message_logs WHERE user_id=$1 AND created_at < $2 ORDER BY created_at DESC LIMIT $3`,
+          [String(userId), new Date(String(cursor)), limit]
+        );
+        const dur = Date.now() - t0;
+        try { res.set('Server-Timing', `db;dur=${dur}`); } catch {}
+        logs = r.rows;
+      } else {
+        logs = await storage.getMessageLogsByUserId(String(userId), limit) as any[];
+      }
       try { res.set('Cache-Control','no-store'); } catch {}
-      const payloadObj = { success: true, messages: logs, count: logs.length, limit };
+      const nextCursor = logs.length > 0 ? logs[logs.length - 1].created_at || logs[logs.length - 1].createdAt || null : null;
+      const payloadObj = { success: true, messages: logs, count: logs.length, limit, nextCursor };
       try { console.log("/api/supervisor/messages payload bytes:", Buffer.byteLength(JSON.stringify(payloadObj))); } catch {}
       try { res.set('Connection','close'); res.type('application/json'); } catch {}
       return res.send(JSON.stringify(payloadObj));
@@ -5842,18 +5887,14 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
         }
       }
       try {
-        const { Pool } = await import('pg');
-        const connectionString = process.env.DATABASE_URL!;
-        const useSSL = connectionString.includes('sslmode=require') || process.env.POSTGRES_SSL === 'true';
-        const pool = new Pool(useSSL ? { connectionString, ssl: { rejectUnauthorized: false } } : { connectionString });
-        await pool.query('ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS is_deleted boolean NOT NULL DEFAULT false');
-        await pool.end();
+        const pool = getDbPool();
+        if (pool) {
+          await pool.query('ALTER TABLE incoming_messages ADD COLUMN IF NOT EXISTS is_deleted boolean NOT NULL DEFAULT false');
+        }
       } catch {}
       const digits = String(phoneNumber).replace(/[^0-9]/g, '');
-      const { Pool } = await import('pg');
-      const connectionString = process.env.DATABASE_URL!;
-      const useSSL = connectionString.includes('sslmode=require') || process.env.POSTGRES_SSL === 'true';
-      const pool = new Pool(useSSL ? { connectionString, ssl: { rejectUnauthorized: false } } : { connectionString });
+      const pool = getDbPool();
+      if (!pool) throw new Error('Database not connected');
       const result = await pool.query(
         `UPDATE incoming_messages SET is_deleted = true
          WHERE (
@@ -5894,8 +5935,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
           return;
         }
       } catch {}
-      await pool.end();
-      res.json({ success: true, affected: result.rowCount || 0 });
+       res.json({ success: true, affected: result.rowCount || 0 });
     } catch (e: any) {
       res.status(500).json({ error: e?.message || 'Failed to delete conversation' });
     }

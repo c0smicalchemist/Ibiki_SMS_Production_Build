@@ -133,6 +133,10 @@ Backups/
 release/*.zip
 release/*.tar.gz
 
+# Desktop build artifacts
+desktop/release/
+desktop/dist/
+
 # Development artifacts (production cleanup)
 design_guidelines.md
 testing/

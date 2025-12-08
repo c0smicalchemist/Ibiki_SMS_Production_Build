@@ -1,5 +1,5 @@
 import { Switch, Route, useLocation } from "wouter";
-import { useEffect, useState } from "react";
+import { useEffect, useState, Suspense, lazy } from "react";
 import { apiRequest } from "./lib/queryClient";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -7,19 +7,19 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { LanguageProvider } from "@/contexts/LanguageContext";
 import { ThemeProvider } from "@/contexts/ThemeContext";
-import NotFound from "@/pages/not-found";
-import Landing from "@/pages/Landing";
-import Signup from "@/pages/Signup";
-import Login from "@/pages/Login";
-import ForgotPassword from "@/pages/ForgotPassword";
-import ResetPassword from "@/pages/ResetPassword";
-import ClientDashboard from "@/pages/ClientDashboard";
-import ApiDocs from "@/pages/ApiDocs";
-import AdminDashboard from "@/pages/AdminDashboard";
-import Contacts from "@/pages/Contacts";
-import SendSMS from "@/pages/SendSMS";
-import Inbox from "@/pages/Inbox";
-import MessageHistory from "@/pages/MessageHistory";
+const NotFound = lazy(() => import("@/pages/not-found"));
+const Landing = lazy(() => import("@/pages/Landing"));
+const Signup = lazy(() => import("@/pages/Signup"));
+const Login = lazy(() => import("@/pages/Login"));
+const ForgotPassword = lazy(() => import("@/pages/ForgotPassword"));
+const ResetPassword = lazy(() => import("@/pages/ResetPassword"));
+const ClientDashboard = lazy(() => import("@/pages/ClientDashboard"));
+const ApiDocs = lazy(() => import("@/pages/ApiDocs"));
+const AdminDashboard = lazy(() => import("@/pages/AdminDashboard"));
+const Contacts = lazy(() => import("@/pages/Contacts"));
+const SendSMS = lazy(() => import("@/pages/SendSMS"));
+const Inbox = lazy(() => import("@/pages/Inbox"));
+const MessageHistory = lazy(() => import("@/pages/MessageHistory"));
 import ErrorBoundary from "@/components/ErrorBoundary";
 
 function ProtectedAdmin() {
@@ -58,7 +58,11 @@ function ProtectedAdmin() {
   }, [setLocation]);
 
   if (allowed === null) return null;
-  return <AdminDashboard />;
+  return (
+    <Suspense fallback={<div />}> 
+      <AdminDashboard />
+    </Suspense>
+  );
 }
 
 function ProtectedSupervisor() {
@@ -88,26 +92,30 @@ function ProtectedSupervisor() {
   }, [setLocation]);
 
   if (allowed === null) return null;
-  return <AdminDashboard />;
+  return (
+    <Suspense fallback={<div />}> 
+      <AdminDashboard />
+    </Suspense>
+  );
 }
 
 function Router() {
   return (
     <Switch>
-      <Route path="/" component={Landing} />
-      <Route path="/signup" component={Signup} />
-      <Route path="/login" component={Login} />
-      <Route path="/forgot-password" component={ForgotPassword} />
-      <Route path="/reset-password" component={ResetPassword} />
-      <Route path="/dashboard" component={ClientDashboard} />
-      <Route path="/docs" component={ApiDocs} />
+      <Route path="/" component={() => (<Suspense fallback={<div />}> <Landing /> </Suspense>)} />
+      <Route path="/signup" component={() => (<Suspense fallback={<div />}> <Signup /> </Suspense>)} />
+      <Route path="/login" component={() => (<Suspense fallback={<div />}> <Login /> </Suspense>)} />
+      <Route path="/forgot-password" component={() => (<Suspense fallback={<div />}> <ForgotPassword /> </Suspense>)} />
+      <Route path="/reset-password" component={() => (<Suspense fallback={<div />}> <ResetPassword /> </Suspense>)} />
+      <Route path="/dashboard" component={() => (<Suspense fallback={<div />}> <ClientDashboard /> </Suspense>)} />
+      <Route path="/docs" component={() => (<Suspense fallback={<div />}> <ApiDocs /> </Suspense>)} />
       <Route path="/admin" component={ProtectedAdmin} />
       <Route path="/adminsup" component={ProtectedSupervisor} />
-      <Route path="/contacts" component={Contacts} />
-      <Route path="/send-sms" component={SendSMS} />
-      <Route path="/inbox" component={Inbox} />
-      <Route path="/message-history" component={MessageHistory} />
-      <Route component={NotFound} />
+      <Route path="/contacts" component={() => (<Suspense fallback={<div />}> <Contacts /> </Suspense>)} />
+      <Route path="/send-sms" component={() => (<Suspense fallback={<div />}> <SendSMS /> </Suspense>)} />
+      <Route path="/inbox" component={() => (<Suspense fallback={<div />}> <Inbox /> </Suspense>)} />
+      <Route path="/message-history" component={() => (<Suspense fallback={<div />}> <MessageHistory /> </Suspense>)} />
+      <Route component={() => (<Suspense fallback={<div />}> <NotFound /> </Suspense>)} />
     </Switch>
   );
 }
