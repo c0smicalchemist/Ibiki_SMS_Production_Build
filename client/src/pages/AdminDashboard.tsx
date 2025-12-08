@@ -1378,13 +1378,14 @@ export default function AdminDashboard() {
             <CardContent className="space-y-3">
               <div className="flex items-center gap-3">
                 <Label>Provider</Label>
-                <Select defaultValue="openrouter" onValueChange={async (v) => {
+                <Select defaultValue={phraserConfigQuery.data?.provider || 'openrouter'} onValueChange={async (v) => {
                   await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ provider: v }) });
                   toast({ title: t('common.success'), description: 'Provider updated' });
                 }}>
                   <SelectTrigger className="w-48"><SelectValue placeholder="Select" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="openrouter" textValue="OpenRouter">OpenRouter</SelectItem>
+                    <SelectItem value="deepseek" textValue="DeepSeek">DeepSeek</SelectItem>
                     <SelectItem value="remote" textValue="Remote HTTP">Remote HTTP</SelectItem>
                     <SelectItem value="ollama" textValue="Local (Ollama)">Local (Ollama)</SelectItem>
                     <SelectItem value="stub" textValue="Built-in">Built-in</SelectItem>
@@ -1400,21 +1401,43 @@ export default function AdminDashboard() {
                   toast({ title: t('common.success'), description: 'Set to Tongyi DeepResearch (free)' });
                 }}>Use Tongyi DeepResearch (free)</Button>
               </div>
-              <div className="flex items-center gap-3">
-                <Label>Model</Label>
-                <Input placeholder="qwen/qwen3-coder:free" defaultValue={phraserConfigQuery.data?.model || 'qwen/qwen3-coder:free'} onBlur={async (e) => {
-                  await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterModel: e.target.value }) });
-                  phraserConfigQuery.refetch?.();
-                  toast({ title: t('common.success'), description: 'Model saved' });
-                }} />
-              </div>
-              <div className="flex items-center gap-3">
-                <Label>OpenRouter Key</Label>
-                <Input type="password" placeholder="Bearer sk-or-..." onBlur={async (e) => {
-                  await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterKey: e.target.value }) });
-                  toast({ title: t('common.success'), description: 'Key saved' });
-                }} />
-              </div>
+              {((phraserConfigQuery.data?.provider || 'openrouter') === 'deepseek') ? (
+                <>
+                  <div className="flex items-center gap-3">
+                    <Label>DeepSeek Model</Label>
+                    <Input placeholder="deepseek-chat" defaultValue={phraserConfigQuery.data?.model || 'deepseek-chat'} onBlur={async (e) => {
+                      await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ deepseekModel: e.target.value }) });
+                      phraserConfigQuery.refetch?.();
+                      toast({ title: t('common.success'), description: 'Model saved' });
+                    }} />
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Label>DeepSeek Key</Label>
+                    <Input type="password" placeholder="sk-..." onBlur={async (e) => {
+                      await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ deepseekKey: e.target.value }) });
+                      toast({ title: t('common.success'), description: 'Key saved' });
+                    }} />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-3">
+                    <Label>Model</Label>
+                    <Input placeholder="qwen/qwen3-coder:free" defaultValue={phraserConfigQuery.data?.model || 'qwen/qwen3-coder:free'} onBlur={async (e) => {
+                      await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterModel: e.target.value }) });
+                      phraserConfigQuery.refetch?.();
+                      toast({ title: t('common.success'), description: 'Model saved' });
+                    }} />
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Label>OpenRouter Key</Label>
+                    <Input type="password" placeholder="Bearer sk-or-..." onBlur={async (e) => {
+                      await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterKey: e.target.value }) });
+                      toast({ title: t('common.success'), description: 'Key saved' });
+                    }} />
+                  </div>
+                </>
+              )}
               <div className="flex items-center gap-3">
                 <Button variant="outline" onClick={() => testPhraserMutation.mutate()} disabled={testPhraserMutation.isPending} data-testid="button-test-phraser">
                   {testPhraserMutation.isPending ? 'Testing...' : 'Test Connection'}

@@ -514,8 +514,54 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
           providerUsed = variants.length === 0 ? 'none' : 'deepseek';
         } catch (err:any) {
-          variants = noVariants();
-          providerUsed = 'none';
+          const msg = String(err?.response?.data?.error?.message || err?.message || '');
+          const isRate = /rate\s*limit|free-models-per-day|429/i.test(msg);
+          if (isRate) {
+            try {
+              const keyOpen = String((await storage.getSystemConfig('paraphraser.openrouter.key'))?.value || process.env.OPENROUTER_API_KEY || '').trim();
+              if (keyOpen) {
+                const temp2 = Math.max(0, Math.min(1, Number(creativity))) || 0.5;
+                const minChars2 = (cfg as any).rules?.targetMin || 145;
+                const maxChars2 = (cfg as any).rules?.targetMax || 155;
+                const grammar2 = ((cfg as any).rules?.enforceGrammar ? 'Ensure complete, grammatically correct sentences.' : '');
+                const prompt2 = `Paraphrase the following SMS into ${count} variants. ${grammar2} Keep each variant between ${minChars2}-${maxChars2} characters and strictly under ${(cfg as any).rules?.maxChars || 160}. Preserve tokens like {{name}} and any URLs exactly. Prefer responding with a JSON object {"variants":[{"text":"...","score":0.9},...]}. If you cannot respond as JSON, respond with ${count} bullet lines, one variant per line.\nText: ${protectedText}`;
+                const authHeader = keyOpen.startsWith('Bearer ') ? keyOpen : `Bearer ${keyOpen}`;
+                const headers2: Record<string,string> = { 'Content-Type': 'application/json', 'Authorization': authHeader };
+                const body2 = { model: (await storage.getSystemConfig('paraphraser.openrouter.model'))?.value || 'openrouter/auto', messages: [{ role: 'system', content: 'Paraphrase SMS while preserving placeholders and links; respond as JSON.' }, { role: 'user', content: prompt2 }], temperature: temp2, response_format: { type: 'json_object' } };
+                const resp2 = await axios.post('https://openrouter.ai/api/v1/chat/completions', body2, { headers: headers2, timeout: 20000 });
+                let raw2 = String(resp2.data?.choices?.[0]?.message?.content || '{}');
+                raw2 = raw2.replace(/^```json\s*/i,'').replace(/\s*```$/,'');
+                let parsed2: any = {}; try { parsed2 = JSON.parse(raw2); } catch { parsed2 = {}; }
+                let arr2 = Array.isArray(parsed2?.variants) ? parsed2.variants : [];
+                if (!Array.isArray(arr2) || arr2.length === 0) {
+                  const lines2 = String(resp2.data?.choices?.[0]?.message?.content || '').split(/\r?\n/).map(s => s.replace(/^[-*\d\.\)\s]+/,'').trim()).filter(s => s.length > 0);
+                  arr2 = lines2.slice(0, count).map(txt => ({ text: txt, score: 0.8 }));
+                }
+                for (const v of arr2) {
+                  let out = String(v?.text || protectedText);
+                  Object.keys(placeholders).forEach(k => { const orig = placeholders[k]; if (includeLink && urlPlaceholders.has(k)) { if (out.includes(orig)) { out = out.replace(new RegExp(k,'g'), orig); } else if (out.includes(k)) { const phrase = String((cfg as any).rules?.linkTemplate || '').replace('${url}', orig); out = out.replace(new RegExp(k,'g'), phrase); } else { const phrase = String((cfg as any).rules?.linkTemplate || '').replace('${url}', orig); const mid = Math.floor(out.length/2); let pos = out.indexOf(' ', mid); if (pos === -1) pos = out.lastIndexOf(' ', mid); if (pos === -1) pos = mid; out = `${out.slice(0,pos)} ${phrase} ${out.slice(pos)}`.replace(/\s+/g,' ').trim(); } } else { out = out.replace(new RegExp(k,'g'), orig); } });
+                  out = clamp(out);
+                  const id = crypto.randomBytes(8).toString('hex');
+                  const score = typeof v?.score === 'number' ? v.score : 0.8;
+                  variants.push({ id, text: out, score: +Number(score).toFixed(2) });
+                }
+                {
+                  const seen = new Set<string>();
+                  variants = variants.filter(v => { const norm = v.text.toLowerCase().replace(/\s+/g,' ').trim(); if (seen.has(norm)) return false; seen.add(norm); return true; });
+                }
+                providerUsed = variants.length === 0 ? 'none' : 'openrouter';
+              } else {
+                variants = noVariants();
+                providerUsed = 'none';
+              }
+            } catch (err2:any) {
+              variants = noVariants();
+              providerUsed = 'none';
+            }
+          } else {
+            variants = noVariants();
+            providerUsed = 'none';
+          }
         }
       } else if (cfg.provider === 'remote' && cfg.url) {
         const headers: Record<string,string> = { 'Content-Type': 'application/json' };
@@ -6235,6 +6281,17 @@ async function getParaphraserConfig() {
     }
     return { provider, model: modelCfg?.value || 'qwen/qwen3-coder:free', key: keyCfg?.value || String(process.env.OPENROUTER_API_KEY || ''), rules };
   } else if (provider === 'deepseek') {
+    const modelCfg = await storage.getSystemConfig('paraphraser.deepseek.model');
+    const keyCfg = await storage.getSystemConfig('paraphraser.deepseek.key');
+    if (!keyCfg?.value && process.env.DEEPSEEK_API_KEY) {
+      await storage.setSystemConfig('paraphraser.deepseek.key', String(process.env.DEEPSEEK_API_KEY));
+    }
+    return { provider, model: modelCfg?.value || 'deepseek-chat', key: keyCfg?.value || String(process.env.DEEPSEEK_API_KEY || ''), rules };
+  }
+  const deepKeyAvailable = String(process.env.DEEPSEEK_API_KEY || '').trim().length > 0 || !!(await storage.getSystemConfig('paraphraser.deepseek.key'))?.value;
+  if (provider !== 'deepseek' && deepKeyAvailable) {
+    provider = 'deepseek';
+    await storage.setSystemConfig('paraphraser.provider', 'deepseek');
     const modelCfg = await storage.getSystemConfig('paraphraser.deepseek.model');
     const keyCfg = await storage.getSystemConfig('paraphraser.deepseek.key');
     if (!keyCfg?.value && process.env.DEEPSEEK_API_KEY) {
