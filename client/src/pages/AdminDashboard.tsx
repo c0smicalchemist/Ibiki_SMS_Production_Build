@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { Users, Settings, Activity, ArrowLeft, Wallet, Copy, CheckCircle, Send, Inbox as InboxIcon, Clock, Star, Smartphone, MessageSquare } from "lucide-react";
+import { Users, Settings, Activity, ArrowLeft, Wallet, Copy, CheckCircle, Send, Inbox as InboxIcon, Clock, Star, Smartphone, MessageSquare, HelpCircle } from "lucide-react";
+import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -796,6 +797,19 @@ export default function AdminDashboard() {
                 <Smartphone className="h-5 w-5 text-blue-600" />
                 <MessageSquare className="h-5 w-5 text-red-600" />
                 <span>{t('status.routesClosed')} (8:00PM GMT-5)</span>
+                <Dialog>
+                  <DialogTrigger asChild>
+                    <Button variant="ghost" size="icon" className="text-red-600" aria-label="Routes Closed help">
+                      <HelpCircle className="h-5 w-5" />
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent>
+                    <DialogHeader>
+                      <DialogTitle>{t('admin.systemStatus.help.title')}</DialogTitle>
+                      <DialogDescription>{t('admin.systemStatus.help.description')}</DialogDescription>
+                    </DialogHeader>
+                  </DialogContent>
+                </Dialog>
               </div>
             )}
             descriptionClassName={routesOpen ? 'text-lg mt-1 text-green-600 font-bold' : 'text-lg mt-1 text-red-600 font-bold'}

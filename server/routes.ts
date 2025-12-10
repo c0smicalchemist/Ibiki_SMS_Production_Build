@@ -1818,9 +1818,12 @@ app.get('/api/admin/diagnostics/run', authenticateToken, requireRole(['admin','s
        [groupId, start.toISOString(), end.toISOString()]
       );
       await pool.end();
-      const lines = ['user_id,user_name,email,sent_today,received_today'];
+      const lines = ['user_id,user_name,email,sent_today,received_today,reply_rate_percent'];
       rows.rows.forEach((r: any) => {
-        const row = [r.user_id, r.user_name, r.email, String(r.sent_today||0), String(r.received_today||0)].map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',');
+        const sent = Number(r.sent_today||0);
+        const received = Number(r.received_today||0);
+        const rate = sent > 0 ? ((received / sent) * 100).toFixed(2) : '0.00';
+        const row = [r.user_id, r.user_name, r.email, String(sent), String(received), rate].map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',');
         lines.push(row);
       });
       const csv = lines.join('\n');

@@ -461,6 +461,7 @@ export default function Inbox() {
                         const latest = (msgs as any[]).slice().sort((a: any, b: any) => new Date((b.timestamp||b.createdAt)).getTime() - new Date((a.timestamp||a.createdAt)).getTime())[0];
                         const dt = new Date((latest as any).timestamp || (latest as any).createdAt);
                         const hasUnread = (msgs as any[]).some((m: any) => !m.isRead);
+                        const isBlacklisted = (msgs as any[]).some((m: any) => /blacklist|blocked/i.test(String(m.status||'')) || !!m.matchedBlockWord);
                         const lastInboundTs = new Date(((latest as any).timestamp || (latest as any).createdAt)).getTime();
                         const pendingReply = lastInboundTs > (lastOutByPhone[String(phone)] || 0);
                         return (
@@ -469,6 +470,7 @@ export default function Inbox() {
                               {t('inbox.from')}: <span className="font-mono">{String(phone)}</span>
                               <span className="text-[11px] text-muted-foreground ml-2">{format(dt, 'yyyy-MM-dd HH:mm')}</span>
                               {hasUnread && <span className="inline-block w-2 h-2 rounded-full bg-blue-600" title="Unread" />}
+                              {isBlacklisted && <span className="text-[11px] font-semibold text-red-600">Blacklisted</span>}
                             </div>
                             <div className="text-[11px] text-muted-foreground">{t('inbox.to')}: {(latest as any).receiver}</div>
                             <div className="text-[11px] truncate mt-0.5">{(latest as any).message}</div>
