@@ -1105,6 +1105,7 @@ export default function AdminDashboard() {
                 <TabsTrigger value="phraser" data-testid="tab-phraser">Ibiki Phraser</TabsTrigger>
                 <TabsTrigger value="usersummary" data-testid="tab-usersummary">User Summary</TabsTrigger>
                 <TabsTrigger value="groupreport" data-testid="tab-groupreport">Group Report</TabsTrigger>
+                <TabsTrigger value="override" data-testid="tab-override">Override</TabsTrigger>
                 <TabsTrigger value="diagnostics" data-testid="tab-diagnostics">Diagnostics</TabsTrigger>
               </>
             ) : (
@@ -1113,6 +1114,7 @@ export default function AdminDashboard() {
                 <TabsTrigger value="messages" data-testid="tab-messages">Message Activity</TabsTrigger>
                 <TabsTrigger value="createuser" data-testid="tab-createuser">{t('admin.tabs.createUser') || 'User Create'}</TabsTrigger>
                 <TabsTrigger value="groupreport" data-testid="tab-groupreport">Group Report</TabsTrigger>
+                <TabsTrigger value="override" data-testid="tab-override">Override</TabsTrigger>
               </>
             )}
           </TabsList>
@@ -1998,6 +2000,36 @@ export default function AdminDashboard() {
                   ))}
                 </TableBody>
               </Table>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="override" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Route Override</CardTitle>
+              <CardDescription>Allow single SMS send when routes are closed</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center gap-2">
+                <input
+                  id="routesOverrideSupervisor"
+                  type="checkbox"
+                  checked={routeOverride}
+                  onChange={(e) => setRouteOverride(e.target.checked)}
+                />
+                <span className="text-xs text-muted-foreground">Use for quick testing; applies only to single SMS</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setRoutesOverrideMutation.mutate(routeOverride)}
+                  disabled={setRoutesOverrideMutation.isPending}
+                  data-testid="button-save-route-override"
+                >
+                  {setRoutesOverrideMutation.isPending ? 'Saving…' : 'Save Route Override'}
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>

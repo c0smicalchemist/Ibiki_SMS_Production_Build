@@ -42,6 +42,18 @@ async function canSendSingle(req: any) {
   }
   return false;
 }
+function canSendBulk() {
+  return isRoutesOpenNow();
+}
+function isAfterClosedEst(d: Date) {
+  try {
+    const fmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
+    const [hh, mm] = fmt.format(d).split(':');
+    const h = parseInt(hh);
+    const m = parseInt(mm);
+    return h >= 20 || (h === 20 && m >= 0);
+  } catch { return false; }
+}
 function closedMessage() {
   return { error: 'Routes Closed', details: 'Open after 09:00 GMT-8 and closed after 20:00 GMT-5. Admin/Supervisor may enable single-SMS override.' };
 }
@@ -3775,8 +3787,27 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
   // Client: reply (normalize + deduct)
   app.post('/api/web/inbox/reply', authenticateToken, async (req: any, res) => {
     try {
-      if (!(await canSendSingle(req))) return res.status(403).json(closedMessage());
-      const { to, message, userId, defaultDial, usemodem: overrideModem, port: overridePort } = req.body || {};
+      const { to, message, userId, defaultDial } = req.body || {};
+      const effectiveUserIdPre = req.user.role === 'admin' && userId ? userId : req.user.userId;
+      const normalizedToPre = normalizePhone(String(to || ''), String(defaultDial || '+1'));
+      if (!isRoutesOpenNow()) {
+        const role = String(req.user?.role || '').toLowerCase();
+        let allow = false;
+        if (role === 'admin' || role === 'supervisor') {
+          try {
+            const cfg = await storage.getSystemConfig('routes_override_allow_single');
+            allow = String(cfg?.value || '').trim() === 'true';
+          } catch {}
+        }
+        if (!allow && normalizedToPre) {
+          try {
+            const hist = await storage.getConversationHistory(effectiveUserIdPre, normalizedToPre);
+            allow = Array.isArray(hist.incoming) && hist.incoming.length > 0;
+          } catch {}
+        }
+        if (!allow) return res.status(403).json(closedMessage());
+      }
+      const { usemodem: overrideModem, port: overridePort } = req.body || {};
       if (!to || !message) return res.status(400).json({ error: 'to and message required' });
       const effectiveUserId = req.user.role === 'admin' && userId ? userId : req.user.userId;
 
@@ -5306,6 +5337,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
   });
   app.post("/api/web/sms/send-bulk", authenticateToken, async (req: any, res) => {
     try {
+      if (!canSendBulk()) return res.status(403).json(closedMessage());
       const { recipients, message, userId, defaultDial, adminDirect, supervisorDirect } = req.body;
       
       // Check acting on behalf
@@ -5403,6 +5435,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
 
   app.post("/api/web/sms/send-bulk-multi", authenticateToken, async (req: any, res) => {
     try {
+      if (!canSendBulk()) return res.status(403).json(closedMessage());
       const { messages, userId, defaultDial, adminDirect, supervisorDirect } = req.body;
       
       if (userId && !['admin','supervisor'].includes(req.user.role)) {
