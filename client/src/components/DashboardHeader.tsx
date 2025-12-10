@@ -5,7 +5,7 @@ import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { useQuery } from "@tanstack/react-query";
 import { useLanguage } from "@/contexts/LanguageContext";
-import { LogOut, RefreshCcw } from "lucide-react";
+import { LogOut, RefreshCcw, Send, Inbox as InboxIcon, Users, List } from "lucide-react";
 import logoUrl from "@assets/Yubin_Dash_NOBG_1763476645991.png";
 import { queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -94,9 +94,24 @@ export function DashboardHeader() {
   return (
     <header className="border-b border-border bg-background">
       <div className="flex items-center justify-between h-16 px-6">
-        <Link href="/">
-          <img src={logoUrl} alt="Yubin Dash" className="h-10 w-auto cursor-pointer" />
-        </Link>
+        <div className="flex items-center gap-3">
+          <Link href="/">
+            <img src={logoUrl} alt="Yubin Dash" className="h-10 w-auto cursor-pointer" />
+          </Link>
+          {(() => {
+            const path = String(location);
+            const page = path.startsWith('/send-sms') ? 'send' : path.startsWith('/inbox') ? 'inbox' : path.startsWith('/contacts') ? 'contacts' : path.startsWith('/message-history') ? 'history' : '';
+            if (!page) return null;
+            const LabelIcon = page === 'send' ? Send : (page === 'inbox' ? InboxIcon : (page === 'contacts' ? Users : List));
+            const label = page === 'send' ? t('sendSms.title') : (page === 'inbox' ? t('inbox.title') : (page === 'contacts' ? t('contacts.title') : t('messageHistory.title')));
+            return (
+              <div className="flex items-center gap-2">
+                <LabelIcon className="h-4 w-4 text-muted-foreground" />
+                <span className="text-xl md:text-3xl font-bold text-muted-foreground">{label}</span>
+              </div>
+            );
+          })()}
+        </div>
         <div className="flex items-center gap-3">
           {profile?.user?.name && (
             <Badge variant="secondary" data-testid="badge-username">
@@ -150,9 +165,8 @@ export function DashboardHeader() {
           </Button>
         </div>
       </div>
-      <div className="px-6 pb-3">
-        <div className="text-xs text-muted-foreground">
-        </div>
+      <div className="px-6 pb-2">
+        <div className="text-xs text-muted-foreground"></div>
       </div>
     </header>
   );

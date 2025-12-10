@@ -70,7 +70,7 @@ export const translations: Record<Language, Record<string, string>> = {
     'messageHistory.bulkRecipients': 'Bulk recipients',
 
     'worldClock.title': 'World Clock',
-    'worldClock.disclaimer': "SMS campaign messages in the USA between 8 a.m. and 9 p.m. in the recipient's local time zone",
+    'worldClock.disclaimer': "SMS campaign messages in the USA between 9 a.m. and 8 p.m. in the recipient's local time zone",
 
     'inbox.title': 'Inbox',
     'inbox.description': 'View and reply to incoming messages',
@@ -147,6 +147,8 @@ export const translations: Record<Language, Record<string, string>> = {
     'admin.stats.systemStatus': 'System status',
     'admin.stats.healthy': 'Healthy',
     'admin.stats.allRunning': 'All services running',
+    'status.routesOpen': 'Routes Open',
+    'status.routesClosed': 'Routes Closed',
     'admin.clients.table.rateLimit': 'Rate limit',
     'admin.clients.table.businessName': 'Business name',
     'admin.clients.rateLimit.description': 'Max messages allowed per minute',
@@ -432,6 +434,8 @@ export const translations: Record<Language, Record<string, string>> = {
     'admin.stats.systemStatus': '系统状态',
     'admin.stats.healthy': '健康',
     'admin.stats.allRunning': '所有服务运行正常',
+    'status.routesOpen': '通道开放',
+    'status.routesClosed': '通道关闭',
     'admin.clients.table.rateLimit': '速率限制',
     'admin.clients.table.businessName': '公司名称',
     'admin.clients.rateLimit.description': '每分钟允许的最大短信数',

@@ -403,6 +403,15 @@ export default function SendSMS() {
     <div className="min-h-screen bg-background">
       <DashboardHeader />
       <div className="mx-[2cm] p-6 space-y-6">
+        <div className="mb-3 flex items-center gap-3">
+          <Link href={isAdmin ? "/admin" : (isSupervisor ? "/adminsup" : "/dashboard")}>
+            <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
+              <ArrowLeft className="h-5 w-5" strokeWidth={3} />
+            </Button>
+          </Link>
+          <div>{/* Page title moved to header bar; keep minimal spacing */}</div>
+        </div>
+
         {(isAdmin || isSupervisor) && (
           <Card>
             <CardHeader>
@@ -425,18 +434,6 @@ export default function SendSMS() {
             </CardContent>
           </Card>
         )}
-        
-        <div className="mb-6 flex items-center gap-4">
-          <Link href={isAdmin ? "/admin" : (isSupervisor ? "/adminsup" : "/dashboard")}>
-            <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
-              <ArrowLeft className="h-5 w-5" strokeWidth={3} />
-            </Button>
-          </Link>
-          <div>
-            <h1 className="text-3xl font-bold">{t('sendSms.title')}</h1>
-            <p className="text-muted-foreground">{t('sendSms.subtitle')}</p>
-          </div>
-        </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="grid w-full grid-cols-4">

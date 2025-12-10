@@ -408,7 +408,16 @@ export default function Contacts() {
   return (
     <div className="min-h-screen bg-background">
       <DashboardHeader />
-      <div className="container mx-auto p-6 space-y-6">
+      <div className="mx-[2cm] p-6 space-y-6">
+        <div className="flex items-center gap-3">
+          <Link href={isAdmin ? "/admin" : (profile?.user?.role === 'supervisor' ? "/adminsup" : "/dashboard")}>
+            <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
+              <ArrowLeft className="h-5 w-5" strokeWidth={3} />
+            </Button>
+          </Link>
+          <div>{/* Page title moved to header bar; keep minimal spacing */}</div>
+        </div>
+
         {(isAdmin || profile?.user?.role === 'supervisor') && (
           <Card>
             <CardHeader>
@@ -465,17 +474,7 @@ export default function Contacts() {
         )}
         
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link href={isAdmin ? "/admin" : (profile?.user?.role === 'supervisor' ? "/adminsup" : "/dashboard")}>
-              <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
-                <ArrowLeft className="h-5 w-5" strokeWidth={3} />
-              </Button>
-            </Link>
-            <div>
-              <h1 className="text-3xl font-bold">{t('contacts.title')}</h1>
-              <p className="text-muted-foreground">{t('contacts.subtitle')}</p>
-            </div>
-          </div>
+          <div></div>
           <div className="flex gap-2">
           <Dialog open={showGroupDialog} onOpenChange={setShowGroupDialog}>
             <DialogTrigger asChild>

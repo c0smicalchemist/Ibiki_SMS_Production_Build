@@ -16,6 +16,36 @@ const JWT_SECRET = process.env.SESSION_SECRET || process.env.JWT_SECRET || "your
 const PROTECTED_ADMIN_EMAIL = 'ibiki_dash@proton.me';
 const EXTREMESMS_BASE_URL = "https://extremesms.net";
 
+function getHourInZone(tz: string) {
+  try {
+    const d = new Date();
+    const fmt = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
+    const parts = fmt.format(d).split(':');
+    return { hour: parseInt(parts[0]), minute: parseInt(parts[1]) };
+  } catch { return { hour: 0, minute: 0 }; }
+}
+function isRoutesOpenNow() {
+  const pst = getHourInZone('America/Los_Angeles');
+  const est = getHourInZone('America/New_York');
+  const afterPst9 = pst.hour >= 9;
+  const beforeEst20 = est.hour < 20;
+  return afterPst9 && beforeEst20;
+}
+async function canSendSingle(req: any) {
+  if (isRoutesOpenNow()) return true;
+  const role = String(req.user?.role || '').toLowerCase();
+  if (role === 'admin' || role === 'supervisor') {
+    try {
+      const cfg = await storage.getSystemConfig('routes_override_allow_single');
+      return String(cfg?.value || '').trim() === 'true';
+    } catch { return false; }
+  }
+  return false;
+}
+function closedMessage() {
+  return { error: 'Routes Closed', details: 'Open after 09:00 GMT-8 and closed after 20:00 GMT-5. Admin/Supervisor may enable single-SMS override.' };
+}
+
 // Middleware to verify JWT token
 async function authenticateToken(req: any, res: any, next: any) {
   const hdr = req.headers["authorization"] || req.headers["Authorization"] || req.headers["x-auth-token"];
@@ -674,6 +704,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       healthStatus.database = "error";
       
       res.json(healthStatus);
+    }
+  });
+
+  // Routes gating status (public)
+  app.get('/api/system/gating', async (_req, res) => {
+    try {
+      const open = isRoutesOpenNow();
+      const override = await storage.getSystemConfig('routes_override_allow_single');
+      res.json({ success: true, open, override: (override?.value === 'true') });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e?.message || 'Failed to get gating status' });
     }
   });
 
@@ -2920,21 +2961,21 @@ app.post("/api/admin/users/:userId/revoke-keys", authenticateToken, requireRole(
 
   // Get system configuration
 app.get("/api/admin/config", authenticateToken, requireRole(['admin','supervisor']), async (req, res) => {
-  try {
-      const configs = await storage.getAllSystemConfig();
-      const configMap: Record<string, string> = {};
-      const allowedForSupervisor = new Set([
-        'client_rate_per_sms','timezone','default_admin_messages_limit','default_client_messages_limit'
-      ]);
-      configs.forEach(config => {
-        if (req.user.role === 'admin' || allowedForSupervisor.has(config.key)) {
-          configMap[config.key] = config.value;
-        }
-      });
-      res.json({ success: true, config: configMap });
-  } catch (error) {
-      res.status(500).json({ error: "Failed to fetch configuration" });
-    }
+    try {
+        const configs = await storage.getAllSystemConfig();
+        const configMap: Record<string, string> = {};
+        const allowedForSupervisor = new Set([
+          'client_rate_per_sms','timezone','default_admin_messages_limit','default_client_messages_limit','routes_override_allow_single'
+        ]);
+        configs.forEach(config => {
+          if (req.user.role === 'admin' || allowedForSupervisor.has(config.key)) {
+            configMap[config.key] = config.value;
+          }
+        });
+        res.json({ success: true, config: configMap });
+    } catch (error) {
+        res.status(500).json({ error: "Failed to fetch configuration" });
+      }
   });
 
   // Update system configuration
@@ -2974,6 +3015,18 @@ app.get("/api/admin/config", authenticateToken, requireRole(['admin','supervisor
     } catch (error) {
       console.error("Config update error:", error);
       res.status(500).json({ error: "Failed to update configuration" });
+    }
+  });
+
+  // Set routes override (Admin and Supervisor)
+  app.post('/api/admin/routes-override', authenticateToken, requireRole(['admin','supervisor']), async (req, res) => {
+    try {
+      const allow = String(req.body?.allow).toLowerCase();
+      const val = (allow === 'true' || allow === '1') ? 'true' : 'false';
+      await storage.setSystemConfig('routes_override_allow_single', val);
+      res.json({ success: true, value: val });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || 'Failed to set route override' });
     }
   });
 
@@ -3649,6 +3702,7 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
   // Client: initial send (omit modem/port)
   app.post('/api/sms/send', authenticateToken, async (req: any, res) => {
     try {
+      if (!(await canSendSingle(req))) return res.status(403).json(closedMessage());
       const { recipient, message, defaultDial } = req.body || {};
       if (!recipient || !message) return res.status(400).json({ error: 'recipient and message required' });
 
@@ -3721,6 +3775,7 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
   // Client: reply (normalize + deduct)
   app.post('/api/web/inbox/reply', authenticateToken, async (req: any, res) => {
     try {
+      if (!(await canSendSingle(req))) return res.status(403).json(closedMessage());
       const { to, message, userId, defaultDial, usemodem: overrideModem, port: overridePort } = req.body || {};
       if (!to || !message) return res.status(400).json({ error: 'to and message required' });
       const effectiveUserId = req.user.role === 'admin' && userId ? userId : req.user.userId;
@@ -5153,6 +5208,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
   // Web UI SMS Sending (calls ExtremeSMS via existing proxy logic)
   app.post("/api/web/sms/send-single", authenticateToken, async (req: any, res) => {
     try {
+      if (!(await canSendSingle(req))) return res.status(403).json(closedMessage());
       const { to, message, userId, defaultDial, adminDirect, supervisorDirect } = req.body;
       
       // Check if userId parameter is being used by non-admin
@@ -5941,62 +5997,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
     }
   });
 
-  // Reply to incoming message
-  app.post("/api/web/inbox/reply", authenticateToken, async (req: any, res) => {
-    try {
-      const { to, message, userId, defaultDial } = req.body;
-      
-      // Check if userId parameter is being used by non-admin
-      if (userId && req.user.role !== 'admin') {
-        return res.status(403).json({ error: "Unauthorized: Only admins can act on behalf of other users" });
-      }
-      
-      if (!to || !message) {
-        return res.status(400).json({ error: "Recipient and message are required" });
-      }
-
-      // Admin can send reply on behalf of another user
-      const targetUserId = (req.user.role === 'admin' && userId) 
-        ? userId 
-        : req.user.userId;
-
-      // Map modem/port from the last inbound message for proper two-way routing
-      const normalizedTo = normalizePhone(String(to), String(defaultDial || '+1'));
-      if (!normalizedTo) return res.status(400).json({ error: "Invalid recipient number" });
-      const history = await storage.getConversationHistory(targetUserId, normalizedTo);
-      const lastInbound = [...(history.incoming || [])].reverse().find(m => !!m.port || !!m.usedmodem) || (history.incoming || []).slice(-1)[0];
-      const usemodem = lastInbound?.usedmodem || null;
-      const port = lastInbound?.port || null;
-
-      const extremeApiKey = await storage.getSystemConfig('extreme_api_key');
-      if (!extremeApiKey?.value) return res.status(400).json({ error: 'ExtremeSMS API key not configured' });
-
-      const payload: any = { recipient: normalizedTo, message };
-      if (usemodem) payload.usemodem = usemodem;
-      if (port) payload.port = port;
-
-      const response = await axios.post('https://extremesms.net/api/v2/sms/sendsingle', payload, {
-        headers: { 'Authorization': `Bearer ${extremeApiKey.value}`, 'Content-Type': 'application/json' }
-      });
-
-      // Deduct credits and log using targetUserId
-      await deductCreditsAndLog(
-        targetUserId,
-        1,
-        'web-ui-reply',
-        response.data?.messageId || 'unknown',
-        'sent',
-        payload,
-        response.data,
-        normalizedTo
-      );
-
-      res.json({ success: true, data: response.data });
-    } catch (error: any) {
-      console.error("Web UI reply error:", error);
-      res.status(500).json({ error: error.message || "Failed to send reply" });
-    }
-  });
+  
 
   // Current authenticated user
   app.get('/api/auth/me', authenticateToken, async (req: any, res) => {

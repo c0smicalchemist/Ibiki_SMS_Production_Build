@@ -312,17 +312,27 @@ export default function Inbox() {
     <div className="min-h-screen bg-background">
       <DashboardHeader />
       <div className="mx-[2cm] p-6 space-y-6">
-        <div className="rounded border p-3 bg-muted/40">
-          <p className="text-sm">1 credit = 1 SMS</p>
-          <p className="text-xs text-muted-foreground">Your credits translate directly to SMS capacity.</p>
+        <div className="mb-4">
+          <div className="flex items-center gap-3">
+            <Link href={isAdmin ? "/admin" : (isSupervisor ? "/adminsup" : "/dashboard")}>
+              <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
+                <ArrowLeft className="h-5 w-5" strokeWidth={3} />
+              </Button>
+            </Link>
+            <div className="flex-1 min-w-0">
+              {/* Page title moved to header bar; keep minimal spacing here */}
+            </div>
+          </div>
+          
         </div>
+
         {(isAdmin || isSupervisor) && (
           <Card>
-            <CardHeader>
+            <CardHeader className="py-2">
               <CardTitle>{isSupervisor ? 'Supervisor Mode' : t('inbox.adminMode')}</CardTitle>
               <CardDescription>{t('inbox.selectClient')}</CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent className="py-2">
               <ClientSelector 
                 selectedClientId={selectedClientId}
                 onClientChange={setSelectedClientId}
@@ -333,37 +343,6 @@ export default function Inbox() {
             </CardContent>
           </Card>
         )}
-        
-        <div className="mb-6">
-          <div className="flex items-center gap-4">
-            <Link href={isAdmin ? "/admin" : (isSupervisor ? "/adminsup" : "/dashboard")}>
-              <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
-                <ArrowLeft className="h-5 w-5" strokeWidth={3} />
-              </Button>
-            </Link>
-            <div className="flex-1 min-w-0">
-              <h1 className="text-3xl font-bold flex items-center gap-2">
-                <InboxIcon className="h-8 w-8" />
-                {t('clientDashboard.inbox')}
-              </h1>
-              <p className="text-muted-foreground">{t('clientDashboard.inboxDesc')}</p>
-            </div>
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-3 justify-end">
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-9 px-3 min-w-[4rem] flex flex-col items-center justify-center bg-gray-500 text-white border-none"
-              title="All"
-              disabled
-            >
-              <span className="text-sm font-bold leading-none">{messages.length.toLocaleString()}</span>
-              <span className="text-[11px] opacity-80 leading-none mt-0.5">{t('inbox.indicator.all')}</span>
-            </Button>
-            <UnreadIndicator userId={effectiveUserId} isAdmin={isAdmin} />
-            {/* Deleted toggle moved below near favourites */}
-          </div>
-        </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-[400px_1fr] gap-4">
           {isLoading && !messages.length ? (
@@ -391,10 +370,25 @@ export default function Inbox() {
             </Card>
           ) : (
             <>
-              <Card>
-                <CardHeader className={viewFavorites ? 'py-3 border-t-4 border-yellow-400' : 'py-3'}>
-                  <div className="flex items-center gap-2">
-                    <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t('inbox.search')} className="w-64" />
+              <Card className="overflow-hidden">
+                <CardHeader className={viewFavorites ? 'py-2 px-4 border-t-4 border-yellow-400' : 'py-2 px-4'}>
+                  <div className="flex items-center gap-2 flex-nowrap">
+                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                      <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t('inbox.search')} className="w-full" />
+                    </div>
+                    <div className="flex items-center gap-2 ml-auto">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 min-w-[3.5rem] flex flex-col items-center justify-center bg-gray-500 text-white border-none"
+                        title="All"
+                        disabled
+                      >
+                        <span className="text-sm font-bold leading-none">{messages.length.toLocaleString()}</span>
+                        <span className="text-[11px] opacity-80 leading-none mt-0.5">{t('inbox.indicator.all')}</span>
+                      </Button>
+                      <UnreadIndicator userId={effectiveUserId} isAdmin={isAdmin} />
+                    </div>
                   </div>
                 </CardHeader>
                 <CardContent className="p-0">
@@ -443,7 +437,7 @@ export default function Inbox() {
                       <option value="oldest">{t('inbox.sort.oldest')}</option>
                     </select>
                   </div>
-                  <div className="h-[70vh] overflow-y-scroll">
+                  <div className="h-[72vh] overflow-y-scroll overflow-x-hidden">
                     {Object.entries(groupedMessages)
                       .filter(([phone, msgs]: any[]) => {
                         const q = search.trim().toLowerCase();
@@ -470,14 +464,14 @@ export default function Inbox() {
                         const lastInboundTs = new Date(((latest as any).timestamp || (latest as any).createdAt)).getTime();
                         const pendingReply = lastInboundTs > (lastOutByPhone[String(phone)] || 0);
                         return (
-                          <div key={phone} className={`p-3 border-b cursor-pointer ${selectedPhoneNumber === phone ? 'bg-muted' : ''}`} onClick={() => setSelectedPhoneNumber(phone)}>
+                          <div key={phone} className={`p-2 border-b cursor-pointer ${selectedPhoneNumber === phone ? 'bg-muted' : ''}`} onClick={() => setSelectedPhoneNumber(phone)}>
                             <div className="text-sm font-semibold flex items-center gap-2">
                               {t('inbox.from')}: <span className="font-mono">{String(phone)}</span>
+                              <span className="text-[11px] text-muted-foreground ml-2">{format(dt, 'yyyy-MM-dd HH:mm')}</span>
                               {hasUnread && <span className="inline-block w-2 h-2 rounded-full bg-blue-600" title="Unread" />}
                             </div>
-                            <div className="text-xs text-muted-foreground">{t('inbox.to')}: {(latest as any).receiver}</div>
-                            <div className="text-xs truncate mt-1">{(latest as any).message}</div>
-                            <div className="text-xs mt-1">{format(dt, 'yyyy-MM-dd HH:mm')}</div>
+                            <div className="text-[11px] text-muted-foreground">{t('inbox.to')}: {(latest as any).receiver}</div>
+                            <div className="text-[11px] truncate mt-0.5">{(latest as any).message}</div>
                           </div>
                         );
                       })}

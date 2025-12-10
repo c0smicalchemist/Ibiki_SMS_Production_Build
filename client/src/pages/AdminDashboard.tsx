@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Users, Settings, Activity, ArrowLeft, Wallet, Copy, CheckCircle, Send, Inbox as InboxIcon, Clock, Star } from "lucide-react";
+import { Users, Settings, Activity, ArrowLeft, Wallet, Copy, CheckCircle, Send, Inbox as InboxIcon, Clock, Star, Smartphone, MessageSquare } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -72,6 +72,8 @@ export default function AdminDashboard() {
 
   const { data: config } = useQuery<{ success: boolean; config: Record<string, string> }>({ queryKey: ['/api/admin/config'] });
   const { data: profile } = useQuery<{ user: { id: string; role: string } }>({ queryKey: ['/api/client/profile'] });
+  const [routeOverride, setRouteOverride] = useState<boolean>(false);
+  const [routesOpen, setRoutesOpen] = useState<boolean>(true);
 
   useEffect(() => {
     if (config?.config) {
@@ -81,8 +83,30 @@ export default function AdminDashboard() {
       setTimezone(config.config.timezone || "America/New_York");
       setWebhookBusiness(config.config.admin_default_business_id || 'IBS_0');
       setSignupSeedExamples((config.config.signup_seed_examples || 'false') === 'true');
+      setRouteOverride((config.config.routes_override_allow_single || 'false') === 'true');
     }
   }, [config]);
+
+  useEffect(() => {
+    const getHourInZone = (tz: string) => {
+      try {
+        const d = new Date();
+        const fmt = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
+        const parts = fmt.format(d).split(':');
+        return { hour: parseInt(parts[0]), minute: parseInt(parts[1]) };
+      } catch { return { hour: 0, minute: 0 }; }
+    };
+    const calc = () => {
+      const pst = getHourInZone('America/Los_Angeles');
+      const est = getHourInZone('America/New_York');
+      const afterPst9 = pst.hour > 9 || (pst.hour === 9 && pst.minute >= 0);
+      const beforeEst20 = est.hour < 20 || (est.hour === 20 && est.minute === 0);
+      setRoutesOpen(afterPst9 && beforeEst20);
+    };
+    calc();
+    const id = setInterval(calc, 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const groupPricingQuery = useQuery<{ success: boolean; base: { extremeCost: number; clientRate: number }; group?: { extremeCost?: number; clientRate?: number } | null; groupId: string | null }>({
     queryKey: ['/api/admin/pricing', groupIdPricing || ''],
@@ -704,6 +728,19 @@ export default function AdminDashboard() {
     });
   };
 
+  const setRoutesOverrideMutation = useMutation({
+    mutationFn: async (allow: boolean) => {
+      return await apiRequest('/api/admin/routes-override', { method: 'POST', body: JSON.stringify({ allow }) });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['/api/admin/config'] });
+      toast({ title: t('common.success'), description: 'Route override updated' });
+    },
+    onError: (error: any) => {
+      toast({ title: t('common.error'), description: error?.message || 'Failed to update override', variant: 'destructive' });
+    }
+  });
+
   
 
   return (
@@ -748,7 +785,20 @@ export default function AdminDashboard() {
             title={t('admin.stats.systemStatus')}
             value={t('admin.stats.healthy')}
             icon={Settings}
-            description={t('admin.stats.allRunning')}
+            descriptionNode={routesOpen ? (
+              <div className="flex items-center gap-2">
+                <Smartphone className="h-5 w-5 text-blue-600" />
+                <MessageSquare className="h-5 w-5 text-green-600" />
+                <span>{t('status.routesOpen')} (9:00AM GMT-8)</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Smartphone className="h-5 w-5 text-blue-600" />
+                <MessageSquare className="h-5 w-5 text-red-600" />
+                <span>{t('status.routesClosed')} (8:00PM GMT-5)</span>
+              </div>
+            )}
+            descriptionClassName={routesOpen ? 'text-lg mt-1 text-green-600 font-bold' : 'text-lg mt-1 text-red-600 font-bold'}
           />
           <StatCard
             title={'User'}
@@ -1391,15 +1441,7 @@ export default function AdminDashboard() {
                     <SelectItem value="stub" textValue="Built-in">Built-in</SelectItem>
                   </SelectContent>
                 </Select>
-                <Button variant="secondary" onClick={async () => {
-                  await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ provider: 'openrouter', openrouterModel: 'qwen/qwen3-coder:free' }) });
-                  toast({ title: t('common.success'), description: 'Set to Qwen3 Coder (free)' });
-                }}>Use Qwen3 Coder (free)</Button>
-                <Button variant="secondary" className="ml-2" onClick={async () => {
-                  await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ provider: 'openrouter', openrouterModel: 'alibaba/tongyi-deepresearch-30b-a3b:free' }) });
-                  phraserConfigQuery.refetch?.();
-                  toast({ title: t('common.success'), description: 'Set to Tongyi DeepResearch (free)' });
-                }}>Use Tongyi DeepResearch (free)</Button>
+                {/* Model presets moved into OpenRouter submenu below */}
               </div>
               {((phraserConfigQuery.data?.provider || 'openrouter') === 'deepseek') ? (
                 <>
@@ -1422,17 +1464,29 @@ export default function AdminDashboard() {
               ) : (
                 <>
                   <div className="flex items-center gap-3">
-                    <Label>Model</Label>
-                    <Input placeholder="qwen/qwen3-coder:free" defaultValue={phraserConfigQuery.data?.model || 'qwen/qwen3-coder:free'} onBlur={async (e) => {
-                      await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterModel: e.target.value }) });
+                    <Label>OpenRouter Model</Label>
+                    <select className="border rounded px-2 py-1 text-xs"
+                      defaultValue={phraserConfigQuery.data?.model || 'qwen/qwen3-coder:free'}
+                      onChange={async (e) => {
+                        await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterModel: e.target.value }) });
+                        phraserConfigQuery.refetch?.();
+                        toast({ title: t('common.success'), description: 'Model saved' });
+                      }}>
+                      <option value="qwen/qwen3-coder:free">Qwen3 Coder (free)</option>
+                      <option value="alibaba/tongyi-deepresearch-30b-a3b:free">Tongyi DeepResearch (free)</option>
+                    </select>
+                    <Input placeholder="custom model id" className="w-64" onBlur={async (e) => {
+                      const v = e.target.value.trim(); if (!v) return;
+                      await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterModel: v }) });
                       phraserConfigQuery.refetch?.();
-                      toast({ title: t('common.success'), description: 'Model saved' });
+                      toast({ title: t('common.success'), description: 'Custom model saved' });
                     }} />
                   </div>
                   <div className="flex items-center gap-3">
                     <Label>OpenRouter Key</Label>
-                    <Input type="password" placeholder="Bearer sk-or-..." onBlur={async (e) => {
-                      await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterKey: e.target.value }) });
+                    <Input type="password" placeholder="sk-or-..." onBlur={async (e) => {
+                      const raw = e.target.value.trim(); const v = raw.startsWith('Bearer ') ? raw : `Bearer ${raw}`;
+                      await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterKey: v }) });
                       toast({ title: t('common.success'), description: 'Key saved' });
                     }} />
                   </div>
@@ -1586,6 +1640,29 @@ export default function AdminDashboard() {
                       onChange={(e) => setSignupSeedExamples(e.target.checked)}
                     />
                     <span className="text-xs text-muted-foreground">When enabled, new accounts receive example inbox/messages</span>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="routesOverride">Route Override: allow single SMS when closed (Admin/Supervisor)</Label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      id="routesOverride"
+                      type="checkbox"
+                      checked={routeOverride}
+                      onChange={(e) => setRouteOverride(e.target.checked)}
+                    />
+                    <span className="text-xs text-muted-foreground">Use for quick testing when routes are closed; applies only to single SMS</span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setRoutesOverrideMutation.mutate(routeOverride)}
+                      disabled={setRoutesOverrideMutation.isPending}
+                      data-testid="button-save-route-override"
+                    >
+                      {setRoutesOverrideMutation.isPending ? 'Saving…' : 'Save Route Override'}
+                    </Button>
                   </div>
                 </div>
 

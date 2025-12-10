@@ -11,8 +11,54 @@ interface TimeZoneConfig {
   cities: string[];
 }
 
-const timeZones: TimeZoneConfig[] = [
-  // GMT-5 first
+// USA timezones (remove GMT-9) ordered by GMT -8, -7, -6, -5 for column alignment
+const usTimeZones: TimeZoneConfig[] = [
+  // GMT-8
+  {
+    name: "Los Angeles",
+    nameZh: "洛杉矶",
+    timezone: "America/Los_Angeles",
+    offset: "GMT-8",
+    cities: [
+      "Los Angeles",
+      "San Francisco",
+      "San Diego",
+      "Seattle",
+      "Portland",
+      "Las Vegas",
+    ],
+  },
+  // GMT-7
+  {
+    name: "Denver",
+    nameZh: "丹佛",
+    timezone: "America/Denver",
+    offset: "GMT-7",
+    cities: [
+      "Phoenix",
+      "Salt Lake City",
+      "Boise",
+      "Santa Fe",
+      "Cheyenne",
+      "Helena",
+    ],
+  },
+  // GMT-6
+  {
+    name: "Chicago",
+    nameZh: "芝加哥",
+    timezone: "America/Chicago",
+    offset: "GMT-6",
+    cities: [
+      "Dallas",
+      "Houston",
+      "Chicago",
+      "Minneapolis",
+      "St. Louis",
+      "New Orleans",
+    ],
+  },
+  // GMT-5
   {
     name: "New York",
     nameZh: "纽约",
@@ -25,94 +71,39 @@ const timeZones: TimeZoneConfig[] = [
       "Atlanta",
       "Boston",
       "Washington D.C.",
-      "Detroit",
-      "Baltimore",
-      "Charlotte",
     ],
   },
-  // GMT-6
+];
+
+// Canada timezones
+const caTimeZones: TimeZoneConfig[] = [
   {
-    name: "Chicago",
-    nameZh: "芝加哥",
-    timezone: "America/Chicago",
-    offset: "GMT-6",
-    cities: [
-      "Texas",
-      "Illinois",
-      "Minnesota",
-      "Missouri",
-      "Louisiana",
-      "Wisconsin",
-      "Oklahoma",
-      "Arkansas",
-      "Iowa",
-      "Mississippi",
-      "Tennessee",
-      "Kansas",
-    ],
-  },
-  // GMT-7
-  {
-    name: "Denver",
-    nameZh: "丹佛",
-    timezone: "America/Denver",
-    offset: "GMT-7",
-    cities: [
-      "Arizona",
-      "Colorado",
-      "Utah",
-      "Idaho",
-      "Montana",
-      "Wyoming",
-      "New Mexico",
-      "Nebraska",
-      "South Dakota",
-      "Kansas (west)",
-      "Texas (west)",
-      "North Dakota (west)",
-    ],
-  },
-  // GMT-8
-  {
-    name: "Los Angeles",
-    nameZh: "洛杉矶",
-    timezone: "America/Los_Angeles",
+    name: "Vancouver",
+    nameZh: "温哥华",
+    timezone: "America/Vancouver",
     offset: "GMT-8",
-    cities: [
-      "California",
-      "Washington",
-      "Oregon",
-      "Nevada",
-      "Idaho",
-      "Arizona",
-      "British Columbia",
-      "Baja California",
-      "Alberta",
-      "Yukon (south)",
-      "Hermosillo",
-      "Tijuana",
-    ],
+    cities: ["Surrey", "Burnaby", "Richmond"],
   },
-  // GMT-9
   {
-    name: "Anchorage",
-    nameZh: "安克雷奇",
-    timezone: "America/Anchorage",
-    offset: "GMT-9",
-    cities: [
-      "Alaska",
-      "Fairbanks",
-      "Juneau",
-      "Sitka",
-      "Ketchikan",
-      "Kenai",
-      "Kodiak",
-      "Bethel",
-      "Dillingham",
-      "Nome",
-      "Barrow",
-      "Homer",
-    ],
+    name: "Edmonton",
+    nameZh: "埃德蒙顿",
+    timezone: "America/Edmonton",
+    offset: "GMT-7",
+    cities: ["Calgary", "Red Deer", "Lethbridge"],
+  },
+  {
+    name: "Winnipeg",
+    nameZh: "温尼伯",
+    timezone: "America/Winnipeg",
+    offset: "GMT-6",
+    cities: ["Brandon", "Steinbach", "Selkirk"],
+  },
+  {
+    name: "Toronto",
+    nameZh: "多伦多",
+    timezone: "America/Toronto",
+    offset: "GMT-5",
+    cities: ["Ottawa", "Mississauga", "Hamilton"],
   },
 ];
 
@@ -124,8 +115,7 @@ export function WorldClock() {
     const updateTimes = () => {
       const newTimes = new Map<string, string>();
       const now = new Date();
-      
-      timeZones.forEach((tz) => {
+      [...usTimeZones, ...caTimeZones].forEach((tz) => {
         const timeString = now.toLocaleTimeString('en-US', {
           timeZone: tz.timezone,
           hour: '2-digit',
@@ -135,7 +125,7 @@ export function WorldClock() {
         });
         newTimes.set(tz.timezone, timeString);
       });
-      
+
       setTimes(newTimes);
     };
 
@@ -183,8 +173,9 @@ export function WorldClock() {
         </CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-          {timeZones.map((tz) => (
+        <div className="text-xs font-semibold text-muted-foreground">USA</div>
+        <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-3">
+          {usTimeZones.map((tz) => (
             <div
               key={tz.timezone}
               className="flex flex-col items-center p-2 rounded-md border-2 border-blue-500/30 hover-elevate"
@@ -200,9 +191,22 @@ export function WorldClock() {
                 {tz.offset}
               </div>
               <div className="mt-2 grid grid-cols-3 gap-1.5 text-[10px] leading-4 text-muted-foreground text-center" data-testid={`cities-${tz.timezone}`}>
-                {tz.cities.slice(0, 9).map((c) => (
+                {tz.cities.slice(0, 6).map((c) => (
                   <span key={c} className="whitespace-normal break-words">{c}</span>
                 ))}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="mt-4 text-xs font-semibold text-muted-foreground">Canada</div>
+        <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-3">
+          {caTimeZones.map((tz) => (
+            <div key={tz.timezone} className="flex flex-col items-center p-2 rounded-md border-2 border-blue-500/30 hover-elevate">
+              <div className="text-lg font-bold font-mono tabular-nums">{renderTime(times.get(tz.timezone) || '00:00:00')}</div>
+              <div className="text-xs text-muted-foreground mt-1 text-center" style={{ color: 'inherit' }}>{renderCityName(language === 'zh' ? tz.nameZh : tz.name)}</div>
+              <div className="text-xs text-muted-foreground/60">{tz.offset}</div>
+              <div className="mt-2 grid grid-cols-3 gap-1.5 text-[10px] leading-4 text-muted-foreground text-center">
+                {tz.cities.slice(0, 3).map((c) => (<span key={c} className="whitespace-normal break-words">{c}</span>))}
               </div>
             </div>
           ))}

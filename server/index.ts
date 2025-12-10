@@ -84,12 +84,24 @@ function serveStatic(app: express.Express) {
     return;
   }
   app.use(express.static(distPath, { setHeaders: (res) => { res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate'); } }));
+  app.get('/favicon.ico', (_req, res) => {
+    const icoPng = path.resolve(distPath, 'favicon.png');
+    if (fs.existsSync(icoPng)) {
+      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      return res.sendFile(icoPng);
+    }
+    res.status(404).end();
+  });
   app.get(/^(?!\/api).*/, (_req, res) => {
     const indexPath = path.resolve(distPath, "index.html");
     try {
       const html = fs.readFileSync(indexPath, 'utf8');
+      const buildId = process.env.BUILD_ID || String(Math.floor(Date.now()/1000));
+      const rebased = html
+        .replace(/(href=\"\/assets\/[^\"]+\.(?:css|js)\")/g, (m) => m.replace(/\"$/, `?v=${buildId}\"`))
+        .replace(/(src=\"\/assets\/[^\"]+\.(?:js)\")/g, (m) => m.replace(/\"$/, `?v=${buildId}\"`));
       const inject = `<script>\n(function(){\nvar s=document.createElement('style');s.innerHTML='.__err{position:fixed;left:0;right:0;top:0;background:#f44336;color:#fff;padding:8px 12px;font:14px/1.4 system-ui;z-index:2147483647;box-shadow:0 2px 10px rgba(0,0,0,.2)}';document.head.appendChild(s);\nfunction show(e){var el=document.querySelector('.__err');if(!el){el=document.createElement('div');el.className='__err';document.body.appendChild(el);}el.textContent='Error: '+e;}\nwindow.addEventListener('error',function(ev){try{show(ev.error?ev.error.message:String(ev.message||ev));}catch{}});\nwindow.addEventListener('unhandledrejection',function(ev){try{show(ev.reason?String(ev.reason):'Unhandled rejection');}catch{}});\n})();\n</script>`;
-      const out = html.replace('</head>', inject + '</head>');
+      const out = rebased.replace('</head>', inject + '</head>');
       res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.type('html').send(out);
     } catch {
