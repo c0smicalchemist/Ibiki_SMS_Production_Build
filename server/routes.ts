@@ -4829,7 +4829,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
       
       // Check if userId parameter is being used by non-admin
       if (userId && !['admin','supervisor'].includes(req.user.role)) {
-        return res.status(403).json({ error: "Unauthorized: Only admins can act on behalf of other users" });
+        return res.status(403).json({ error: "Unauthorized: Only admins or supervisors can act on behalf of other users" });
       }
       
       if (!name) {
@@ -4877,13 +4877,28 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
   app.delete("/api/contact-groups/:id", authenticateToken, async (req: any, res) => {
     try {
       const { id } = req.params;
-      // Allow admin to delete on behalf of another user via query userId
-      if (req.query.userId && req.user.role !== 'admin') {
-        return res.status(403).json({ error: "Unauthorized: Only admins can act on behalf of other users" });
+      // Allow admin or supervisor to delete on behalf of another user via query userId
+      if (req.query.userId && !['admin','supervisor'].includes(req.user.role)) {
+        return res.status(403).json({ error: "Unauthorized: Only admins or supervisors can act on behalf of other users" });
       }
-      const targetUserId = (req.user.role === 'admin' && req.query.userId)
-        ? req.query.userId
-        : req.user.userId;
+      let targetUserId = req.user.userId;
+      if ((req.user.role === 'admin' || req.user.role === 'supervisor') && req.query.userId) {
+        targetUserId = String(req.query.userId);
+        if (req.user.role === 'supervisor') {
+          const relaxed = String(process.env.SUPERVISOR_RELAXED || 'true') !== 'false';
+          if (!relaxed && String(targetUserId) !== String(req.user.userId)) {
+            try {
+              const sup = await storage.getClientProfileByUserId(req.user.userId);
+              const tgt = await storage.getClientProfileByUserId(String(targetUserId));
+              if (!sup?.groupId || !tgt?.groupId || String(sup.groupId) !== String(tgt.groupId)) {
+                return res.status(403).json({ error: "Unauthorized: Supervisor can only manage users within their group" });
+              }
+            } catch {
+              return res.status(403).json({ error: "Unauthorized: Group check failed" });
+            }
+          }
+        }
+      }
 
       const group = await storage.getContactGroup(id);
       if (!group) {

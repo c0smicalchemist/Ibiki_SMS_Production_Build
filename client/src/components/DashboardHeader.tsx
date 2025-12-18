@@ -5,11 +5,12 @@ import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { useQuery } from "@tanstack/react-query";
 import { useLanguage } from "@/contexts/LanguageContext";
-import { LogOut, RefreshCcw, Send, Inbox as InboxIcon, Users, List } from "lucide-react";
+import { LogOut, RefreshCcw, Send, Inbox as InboxIcon, Users, List, HelpCircle } from "lucide-react";
+import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import logoUrl from "@assets/Yubin_Dash_NOBG_1763476645991.png";
 import { queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 export function DashboardHeader() {
   const [location, setLocation] = useLocation();
@@ -17,6 +18,8 @@ export function DashboardHeader() {
   const { toast } = useToast();
   const [refreshing, setRefreshing] = useState(false);
   const [retrieving, setRetrieving] = useState(false);
+  const [routesOpen, setRoutesOpen] = useState<boolean>(true);
+  const [countdown, setCountdown] = useState<number>(0);
 
   const { data: profile } = useQuery<{
     user: { id: string; email: string; name: string; company: string | null; role: string };
@@ -91,6 +94,57 @@ export function DashboardHeader() {
     }
   };
 
+  function formatHMS(s: number) {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${pad(h)}:${pad(m)}:${pad(sec)}`;
+  }
+
+  function getHourInZone(tz: string) {
+    try {
+      const d = new Date();
+      const fmt = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
+      const parts = fmt.format(d).split(':');
+      return { hour: parseInt(parts[0]), minute: parseInt(parts[1]) };
+    } catch { return { hour: 0, minute: 0 }; }
+  }
+
+  function getHMSInZone(tz: string) {
+    try {
+      const d = new Date();
+      const fmt = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+      const parts = fmt.format(d).split(':');
+      return { hour: parseInt(parts[0]), minute: parseInt(parts[1]), second: parseInt(parts[2]) };
+    } catch { return { hour: 0, minute: 0, second: 0 }; }
+  }
+
+  function secondsUntil(tz: string, targetHour: number, targetMinute: number) {
+    const now = getHMSInZone(tz);
+    const nowSec = now.hour * 3600 + now.minute * 60 + now.second;
+    const targetSec = targetHour * 3600 + targetMinute * 60;
+    let diff = targetSec - nowSec;
+    if (diff <= 0) diff += 24 * 3600;
+    return diff;
+  }
+
+  useEffect(() => {
+    const calc = () => {
+      const pst = getHourInZone('America/Los_Angeles');
+      const est = getHourInZone('America/New_York');
+      const afterPst9 = pst.hour >= 9;
+      const beforeEst20 = est.hour < 20;
+      const open = afterPst9 && beforeEst20;
+      setRoutesOpen(open);
+      const next = open ? secondsUntil('America/New_York', 20, 0) : secondsUntil('America/Los_Angeles', 9, 0);
+      setCountdown(next);
+    };
+    calc();
+    const id = setInterval(calc, 1000);
+    return () => clearInterval(id);
+  }, []);
+
   return (
     <header className="border-b border-border bg-background">
       <div className="flex items-center justify-between h-16 px-6">
@@ -113,6 +167,32 @@ export function DashboardHeader() {
           })()}
         </div>
         <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3">
+            {routesOpen ? (
+              <div className="flex items-center gap-3">
+                <span className="text-xs md:text-sm font-semibold text-green-600">{t('status.routesOpen')} (9:00AM GMT-8)</span>
+                <span className="text-xs text-muted-foreground">{t('status.closesIn')}: {formatHMS(countdown)}</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-3">
+                <span className="text-xs md:text-sm font-semibold text-red-600">{t('status.routesClosed')} (8:00PM GMT-5)</span>
+                <Dialog>
+                  <DialogTrigger asChild>
+                    <Button variant="ghost" size="icon" className="text-red-600" aria-label="Routes Closed help">
+                      <HelpCircle className="h-4 w-4" />
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent>
+                    <DialogHeader>
+                      <DialogTitle>{t('admin.systemStatus.help.title')}</DialogTitle>
+                      <DialogDescription>{t('admin.systemStatus.help.description')}</DialogDescription>
+                    </DialogHeader>
+                  </DialogContent>
+                </Dialog>
+                <span className="text-xs text-muted-foreground">{t('status.opensIn')}: {formatHMS(countdown)}</span>
+              </div>
+            )}
+          </div>
           {profile?.user?.name && (
             <Badge variant="secondary" data-testid="badge-username">
               {profile.user.name}

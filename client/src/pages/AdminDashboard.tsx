@@ -75,6 +75,7 @@ export default function AdminDashboard() {
   const { data: profile } = useQuery<{ user: { id: string; role: string } }>({ queryKey: ['/api/client/profile'] });
   const [routeOverride, setRouteOverride] = useState<boolean>(false);
   const [routesOpen, setRoutesOpen] = useState<boolean>(true);
+  const [countdown, setCountdown] = useState<number>(0);
 
   useEffect(() => {
     if (config?.config) {
@@ -97,17 +98,43 @@ export default function AdminDashboard() {
         return { hour: parseInt(parts[0]), minute: parseInt(parts[1]) };
       } catch { return { hour: 0, minute: 0 }; }
     };
+    const getHMSInZone = (tz: string) => {
+      try {
+        const d = new Date();
+        const fmt = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+        const parts = fmt.format(d).split(':');
+        return { hour: parseInt(parts[0]), minute: parseInt(parts[1]), second: parseInt(parts[2]) };
+      } catch { return { hour: 0, minute: 0, second: 0 }; }
+    };
+    const secondsUntil = (tz: string, targetHour: number, targetMinute: number) => {
+      const now = getHMSInZone(tz);
+      const nowSec = now.hour * 3600 + now.minute * 60 + now.second;
+      const targetSec = targetHour * 3600 + targetMinute * 60;
+      let diff = targetSec - nowSec;
+      if (diff <= 0) diff += 24 * 3600;
+      return diff;
+    };
     const calc = () => {
       const pst = getHourInZone('America/Los_Angeles');
       const est = getHourInZone('America/New_York');
       const afterPst9 = pst.hour > 9 || (pst.hour === 9 && pst.minute >= 0);
       const beforeEst20 = est.hour < 20 || (est.hour === 20 && est.minute === 0);
       setRoutesOpen(afterPst9 && beforeEst20);
+      const next = (afterPst9 && beforeEst20) ? secondsUntil('America/New_York', 20, 0) : secondsUntil('America/Los_Angeles', 9, 0);
+      setCountdown(next);
     };
     calc();
     const id = setInterval(calc, 1000);
     return () => clearInterval(id);
   }, []);
+
+  const formatHMS = (s: number) => {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${pad(h)}:${pad(m)}:${pad(sec)}`;
+  };
 
   const groupPricingQuery = useQuery<{ success: boolean; base: { extremeCost: number; clientRate: number }; group?: { extremeCost?: number; clientRate?: number } | null; groupId: string | null }>({
     queryKey: ['/api/admin/pricing', groupIdPricing || ''],
@@ -786,33 +813,6 @@ export default function AdminDashboard() {
             title={t('admin.stats.systemStatus')}
             value={t('admin.stats.healthy')}
             icon={Settings}
-            descriptionNode={routesOpen ? (
-              <div className="flex items-center gap-2">
-                <Smartphone className="h-5 w-5 text-blue-600" />
-                <MessageSquare className="h-5 w-5 text-green-600" />
-                <span>{t('status.routesOpen')} (9:00AM GMT-8)</span>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <Smartphone className="h-5 w-5 text-blue-600" />
-                <MessageSquare className="h-5 w-5 text-red-600" />
-                <span>{t('status.routesClosed')} (8:00PM GMT-5)</span>
-                <Dialog>
-                  <DialogTrigger asChild>
-                    <Button variant="ghost" size="icon" className="text-red-600" aria-label="Routes Closed help">
-                      <HelpCircle className="h-5 w-5" />
-                    </Button>
-                  </DialogTrigger>
-                  <DialogContent>
-                    <DialogHeader>
-                      <DialogTitle>{t('admin.systemStatus.help.title')}</DialogTitle>
-                      <DialogDescription>{t('admin.systemStatus.help.description')}</DialogDescription>
-                    </DialogHeader>
-                  </DialogContent>
-                </Dialog>
-              </div>
-            )}
-            descriptionClassName={routesOpen ? 'text-lg mt-1 text-green-600 font-bold' : 'text-lg mt-1 text-red-600 font-bold'}
           />
           <StatCard
             title={'User'}
