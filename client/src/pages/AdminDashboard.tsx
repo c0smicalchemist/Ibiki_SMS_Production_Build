@@ -32,6 +32,80 @@ import { WorldClock } from "@/components/WorldClock";
 import { MessageStatusChart } from "@/components/MessageStatusChart";
 import MessageStatusTiles from "@/components/MessageStatusTiles";
 
+// Vendor management component
+function VendorManager() {
+  const { t } = useLanguage();
+  const [vendors, setVendors] = useState<any[]>([]);
+  const [activeVendor, setActiveVendor] = useState<string>('');
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    fetchVendors();
+  }, []);
+
+  const fetchVendors = async () => {
+    try {
+      const response = await api.get('/api/vendors');
+      if (response.data.success) {
+        setVendors(response.data.vendors);
+        setActiveVendor(response.data.activeVendor);
+      }
+    } catch (error) {
+      console.error('Failed to fetch vendors:', error);
+    }
+  };
+
+  const switchVendor = async (vendorId: string) => {
+    setLoading(true);
+    try {
+      const response = await api.post('/api/vendors/switch', { vendorId });
+      if (response.data.success) {
+        setActiveVendor(vendorId);
+        toast({ title: 'Success', description: `Switched to ${vendorId}`, variant: 'default' });
+        fetchVendors(); // Refresh vendor health
+      }
+    } catch (error: any) {
+      toast({ title: 'Error', description: error.response?.data?.error || 'Failed to switch vendor', variant: 'destructive' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>SMS Vendor Management</CardTitle>
+        <CardDescription>Switch between SMS providers</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-4">
+          {vendors.map((vendor) => (
+            <div key={vendor.id} className="flex items-center justify-between p-3 border rounded-lg">
+              <div className="flex items-center space-x-3">
+                <div className={`w-3 h-3 rounded-full ${vendor.health.healthy ? 'bg-green-500' : 'bg-red-500'}`} />
+                <div>
+                  <p className="font-medium">{vendor.name}</p>
+                  <p className="text-sm text-muted-foreground">
+                    {vendor.health.healthy ? 'Healthy' : vendor.health.reason || 'Unhealthy'}
+                  </p>
+                </div>
+              </div>
+              <Button
+                variant={activeVendor === vendor.id ? "default" : "outline"}
+                onClick={() => switchVendor(vendor.id)}
+                disabled={loading || !vendor.health.healthy}
+                size="sm"
+              >
+                {activeVendor === vendor.id ? 'Active' : 'Switch'}
+              </Button>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function AdminDashboard() {
   const { toast } = useToast();
   const { t } = useLanguage();
@@ -1603,6 +1677,7 @@ export default function AdminDashboard() {
         </TabsContent>
 
         <TabsContent value="configuration" className="space-y-4">
+          <VendorManager />
           <Card className="border border-border/60">
             <CardHeader>
               <CardTitle>{t('admin.config.title')}</CardTitle>

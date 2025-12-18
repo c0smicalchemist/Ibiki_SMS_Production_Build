@@ -61,17 +61,32 @@ export const systemConfig = pgTable("system_config", {
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
 
+// Vendor configuration
+export const vendorConfigs = pgTable("vendor_configs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull().unique(), // 'textbelt', 'extremesms', etc.
+  isActive: boolean("is_active").notNull().default(true),
+  config: jsonb("config").notNull(), // JSON object with vendor-specific settings
+  priority: integer("priority").notNull().default(0), // Lower = higher priority
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (table) => ({
+  nameIdx: index("vendor_name_idx").on(table.name),
+  activeIdx: index("vendor_active_idx").on(table.isActive),
+}));
+
 // Message logs for tracking and billing
 export const messageLogs = pgTable("message_logs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   userId: varchar("user_id").notNull().references(() => users.id),
-  messageId: text("message_id").notNull(), // ExtremeSMS message ID
+  messageId: text("message_id").notNull(), // Vendor message ID
+  vendor: text("vendor").notNull().default('extremesms'), // 'textbelt' or 'extremesms'
   endpoint: text("endpoint").notNull(), // Which endpoint was called
   recipient: text("recipient"),
   recipients: text("recipients").array(), // For bulk messages
   senderPhoneNumber: text("sender_phone_number"), // Phone number used to SEND this message (for 2-way SMS routing)
   status: text("status").notNull(), // queued, sent, delivered, failed
-  costPerMessage: decimal("cost_per_message", { precision: 10, scale: 4 }).notNull(), // What ExtremeSMS charged
+  costPerMessage: decimal("cost_per_message", { precision: 10, scale: 4 }).notNull(), // What vendor charged
   chargePerMessage: decimal("charge_per_message", { precision: 10, scale: 4 }).notNull(), // What we charged the client
   totalCost: decimal("total_cost", { precision: 10, scale: 2 }).notNull(),
   totalCharge: decimal("total_charge", { precision: 10, scale: 2 }).notNull(),

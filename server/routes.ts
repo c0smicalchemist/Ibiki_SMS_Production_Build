@@ -11,10 +11,15 @@ import { exec } from "child_process";
 import { normalizePhone, normalizeMany } from "../shared/phone";
 import crypto from "crypto";
 import { sendPasswordResetEmail } from "./resend";
+import { VendorService } from "./vendor-service";
+import { SMSMessage } from "../shared/vendor-config";
 
 const JWT_SECRET = process.env.SESSION_SECRET || process.env.JWT_SECRET || "your-secret-key-change-in-production";
 const PROTECTED_ADMIN_EMAIL = 'ibiki_dash@proton.me';
 const EXTREMESMS_BASE_URL = "https://extremesms.net";
+
+// Initialize vendor service
+const vendorService = new VendorService();
 
 function getHourInZone(tz: string) {
   try {
@@ -217,9 +222,11 @@ async function deductCreditsAndLog(
   }
 
   // Create message log
+  const activeVendor = vendorService.getActiveVendor();
   const messageLog = await storage.createMessageLog({
     userId,
     messageId,
+    vendor: activeVendor.id,
     endpoint,
     recipient: recipient || null,
     recipients: recipients || null,
@@ -757,6 +764,69 @@ app.get('/api/admin/secrets/status', authenticateToken, requireRole(['admin','su
       res.json({ success: true, configured: out, envPresent, baseUrl, suggestedWebhook, configuredWebhook: configuredWebhookRec?.value || null });
     } catch (e: any) {
       res.status(500).json({ success: false, error: e?.message || String(e) });
+    }
+  });
+
+  // Vendor management endpoints
+  app.get('/api/vendors', authenticateToken, requireRole(['admin','supervisor']), async (req, res) => {
+    try {
+      const vendors = vendorService.getAvailableVendors();
+      const activeVendor = vendorService.getActiveVendor();
+      
+      // Check health for each vendor
+      const vendorHealth = await Promise.all(
+        vendors.map(async (vendor) => {
+          const health = await vendorService.checkVendorHealth(vendor);
+          return {
+            ...vendor,
+            config: {
+              ...vendor.config,
+              apiKey: vendor.config.apiKey ? '***' : undefined
+            },
+            isActive: vendor.id === activeVendor.id,
+            health
+          };
+        })
+      );
+      
+      res.json({ success: true, vendors: vendorHealth, activeVendor: activeVendor.id });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e?.message || 'Failed to get vendors' });
+    }
+  });
+
+  app.post('/api/vendors/switch', authenticateToken, requireRole(['admin','supervisor']), async (req, res) => {
+    try {
+      const { vendorId } = req.body;
+      
+      if (!vendorId) {
+        return res.status(400).json({ success: false, error: 'Vendor ID is required' });
+      }
+
+      const availableVendors = vendorService.getAvailableVendors();
+      const vendorExists = availableVendors.some(v => v.id === vendorId);
+      
+      if (!vendorExists) {
+        return res.status(400).json({ success: false, error: 'Invalid vendor ID' });
+      }
+
+      // Check vendor health before switching
+      const targetVendor = availableVendors.find(v => v.id === vendorId);
+      if (targetVendor) {
+        const health = await vendorService.checkVendorHealth(targetVendor);
+        if (!health.healthy) {
+          return res.status(400).json({ success: false, error: `Vendor ${vendorId} is unhealthy: ${health.reason}` });
+        }
+      }
+
+      vendorService.setActiveVendor(vendorId);
+      
+      // Store in system config
+      await storage.setSystemConfig('active_sms_vendor', vendorId);
+      
+      res.json({ success: true, activeVendor: vendorId });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e?.message || 'Failed to switch vendor' });
     }
   });
 
@@ -3721,27 +3791,28 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
       const { recipient, message, defaultDial } = req.body || {};
       if (!recipient || !message) return res.status(400).json({ error: 'recipient and message required' });
 
-      const extremeApiKey = await storage.getSystemConfig('extreme_api_key');
-      if (!extremeApiKey?.value) return res.status(400).json({ error: 'ExtremeSMS API key not configured' });
-
       const normalizedRecipient = normalizePhone(String(recipient), String(defaultDial || '+1'));
       if (!normalizedRecipient) return res.status(400).json({ error: 'Invalid recipient number' });
-      const payload = { recipient: normalizedRecipient, message };
-      const response = await axios.post(`${EXTREMESMS_BASE_URL}/api/v2/sms/sendsingle`, payload, {
-        headers: {
-          'Authorization': `Bearer ${extremeApiKey.value}`,
-          'Content-Type': 'application/json'
-        }
-      });
+      
+      const smsMessage: SMSMessage = {
+        recipient: normalizedRecipient,
+        message: message
+      };
+      
+      const result = await vendorService.sendSMS(smsMessage);
+      
+      if (!result.success) {
+        return res.status(400).json({ error: result.error || 'Failed to send message' });
+      }
 
       await deductCreditsAndLog(
         req.user.userId,
         1,
         'send-single',
-        response.data?.messageId || `send-${Date.now()}`,
+        result.messageId || `send-${Date.now()}`,
         'sent',
-        payload,
-        response.data,
+        smsMessage,
+        result,
         normalizedRecipient
       );
 
@@ -4492,25 +4563,28 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
 
       const extremeApiKey = await getExtremeApiKey();
       
-      const response = await axios.post(
-        `${EXTREMESMS_BASE_URL}/api/v2/sms/sendbulk`,
-        { recipients: normalizedRecipients, content },
-        {
-          headers: {
-            "Authorization": `Bearer ${extremeApiKey}`,
-            "Content-Type": "application/json"
-          }
-        }
-      );
+      // Use vendor service for bulk SMS
+      const results = [];
+      for (const recipient of normalizedRecipients) {
+        const smsMessage: SMSMessage = {
+          recipient,
+          message: content
+        };
+        const result = await vendorService.sendSMS(smsMessage);
+        results.push(result);
+      }
+
+      const successful = results.filter(r => r.success);
+      const failed = results.filter(r => !r.success);
 
       await deductCreditsAndLog(
         req.user.userId,
-        normalizedRecipients.length,
+        successful.length,
         "/api/v2/sms/sendbulk",
-        response.data.messageIds?.[0] || "bulk_" + Date.now(),
-        response.data.status,
+        successful[0]?.messageId || "bulk_" + Date.now(),
+        successful.length > 0 ? 'sent' : 'failed',
         { recipients, normalizedRecipients, invalid, content },
-        response.data,
+        { results, successful: successful.length, failed: failed.length },
         undefined,
         normalizedRecipients
       );
@@ -4562,26 +4636,30 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
       
       const transformed = messages.map((m: any) => ({ recipient: normalizePhone(String(m.recipient || m.to), '+1'), message: m.message, content: m.message })).filter((m: any) => !!m.recipient);
       if (transformed.length === 0) return res.status(400).json({ success: false, error: "No valid messages after normalization", code: "INVALID_MESSAGES" });
-      const response = await axios.post(
-        `${EXTREMESMS_BASE_URL}/api/v2/sms/sendbulkmulti`,
-        transformed,
-        {
-          headers: {
-            "Authorization": `Bearer ${extremeApiKey}`,
-            "Content-Type": "application/json"
-          }
-        }
-      );
+      
+      // Use vendor service for multi SMS
+      const results = [];
+      for (const message of transformed) {
+        const smsMessage: SMSMessage = {
+          recipient: message.recipient,
+          message: message.message
+        };
+        const result = await vendorService.sendSMS(smsMessage);
+        results.push(result);
+      }
 
+      const successful = results.filter(r => r.success);
+      const failed = results.filter(r => !r.success);
       const recipients = transformed.map(m => m.recipient);
+
       await deductCreditsAndLog(
         req.user.userId,
-        transformed.length,
+        successful.length,
         "/api/v2/sms/sendbulkmulti",
-        response.data.results?.[0]?.messageId || "multi_" + Date.now(),
-        "queued",
+        successful[0]?.messageId || "multi_" + Date.now(),
+        successful.length > 0 ? 'sent' : 'failed',
         transformed,
-        response.data,
+        { results, successful: successful.length, failed: failed.length },
         undefined,
         recipients
       );
