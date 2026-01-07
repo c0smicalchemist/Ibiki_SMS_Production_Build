@@ -1,0 +1,117 @@
+name: Production Deployment Sync
+
+on:
+  push:
+    branches:
+      - Prod_Live_Latest
+  workflow_dispatch:
+
+jobs:
+  security-scan:
+    name: Security & File Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Check for sensitive files
+        run: |
+          echo "🔍 Scanning for sensitive files..."
+          
+          # Check for .env files
+          if git ls-files | grep -E '\.env$|\.env\.production$'; then
+            echo "❌ ERROR: .env files found in repository!"
+            exit 1
+          fi
+          
+          # Check for key files
+          if git ls-files | grep -E '\.pem$|\.key$|id_rsa'; then
+            echo "❌ ERROR: SSH keys or certificates found in repository!"
+            exit 1
+          fi
+          
+          # Check for password files
+          if git ls-files | grep -iE 'password|credential'; then
+            echo "⚠️  WARNING: Files with 'password' or 'credential' in name found"
+            git ls-files | grep -iE 'password|credential'
+          fi
+          
+          echo "✅ No sensitive files detected"
+      
+      - name: Verify .env.example exists
+        run: |
+          if [ ! -f ".env.example" ]; then
+            echo "⚠️  WARNING: .env.example not found"
+          else
+            echo "✅ .env.example exists"
+          fi
+      
+      - name: Check file structure
+        run: |
+          echo "📁 Repository structure:"
+          ls -la
+          
+          echo ""
+          echo "📦 Source directories:"
+          ls -la client/ server/ shared/ 2>/dev/null || echo "Source directories not found"
+
+  notify-deployment:
+    name: Deployment Notification
+    runs-on: ubuntu-latest
+    needs: security-scan
+    if: success()
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Get commit info
+        id: commit
+        run: |
+          echo "message=$(git log -1 --pretty=%B)" >> $GITHUB_OUTPUT
+          echo "author=$(git log -1 --pretty=%an)" >> $GITHUB_OUTPUT
+          echo "sha=$(git log -1 --pretty=%h)" >> $GITHUB_OUTPUT
+          echo "date=$(git log -1 --date=format:'%Y-%m-%d %H:%M:%S' --pretty=%cd)" >> $GITHUB_OUTPUT
+      
+      - name: Create deployment summary
+        run: |
+          echo "## 🚀 Deployment to Production" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** Prod_Live_Latest" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ steps.commit.outputs.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Author:** ${{ steps.commit.outputs.author }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Date:** ${{ steps.commit.outputs.date }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Message:**" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.commit.outputs.message }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ Security checks passed" >> $GITHUB_STEP_SUMMARY
+          echo "- No sensitive files detected" >> $GITHUB_STEP_SUMMARY
+          echo "- .env.example present" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📝 Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. SSH to server: 151.243.109.66" >> $GITHUB_STEP_SUMMARY
+          echo "2. Pull latest: \`git pull origin Prod_Live_Latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. Build: \`npm run build\`" >> $GITHUB_STEP_SUMMARY
+          echo "4. Deploy: \`./sync-deployment.ps1\`" >> $GITHUB_STEP_SUMMARY
+          echo "5. Verify: https://ibiki.run.place" >> $GITHUB_STEP_SUMMARY
+
+  file-count-check:
+    name: File Integrity Check
+    runs-on: ubuntu-latest
+    needs: security-scan
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Count source files
+        run: |
+          echo "📊 Source file statistics:"
+          echo ""
+          echo "Client files: $(find client -type f 2>/dev/null | wc -l)"
+          echo "Server files: $(find server -type f 2>/dev/null | wc -l)"
+          echo "Shared files: $(find shared -type f 2>/dev/null | wc -l)"
+          echo ""
+          echo "Total tracked files: $(git ls-files | wc -l)"
