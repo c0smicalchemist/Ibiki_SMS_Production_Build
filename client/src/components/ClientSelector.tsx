@@ -10,6 +10,8 @@ interface Client {
   name: string;
   email: string;
   credits: string;
+  activeVendorId?: string;
+  activeVendorName?: string;
 }
 
 interface ClientSelectorProps {
@@ -25,11 +27,17 @@ export function ClientSelector({ onClientChange, selectedClientId, onAdminModeCh
   const { data: clientsData, isLoading } = useQuery<{ 
     success: boolean; 
     clients: Client[];
+    activeVendor?: {
+      id: string;
+      name: string;
+      type: string;
+    };
   }>({
     queryKey: ['/api/admin/clients']
   });
 
   const clients = clientsData?.clients || [];
+  const activeVendor = clientsData?.activeVendor;
 
   // Auto-select first client if none selected and not in admin mode
   useEffect(() => {
@@ -106,14 +114,26 @@ export function ClientSelector({ onClientChange, selectedClientId, onAdminModeCh
                   textValue={client.name}
                 >
                   {`${client.name} (${client.email}) $${parseFloat(client.credits).toFixed(2)}`}
+                  {activeVendor && (
+                    <span className="text-xs text-muted-foreground ml-1">
+                      [{activeVendor.name}]
+                    </span>
+                  )}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
           {selectedClient && (
-            <p className="text-xs text-muted-foreground">
-              All actions will be performed as <span className="font-medium">{selectedClient.name}</span>
-            </p>
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">
+                All actions will be performed as <span className="font-medium">{selectedClient.name}</span>
+              </p>
+              {activeVendor && (
+                <p className="text-xs text-blue-600 dark:text-blue-400">
+                  💳 Credits shown for: <span className="font-semibold">{activeVendor.name}</span>
+                </p>
+              )}
+            </div>
           )}
         </div>
       )}
