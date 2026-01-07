@@ -91,7 +91,6 @@ export default function Inbox() {
     staleTime: 30000,
     gcTime: 600000,
     placeholderData: (prev) => prev,
-    keepPreviousData: true,
   });
 
   const messages: IncomingMessage[] = (inboxData as any)?.messages || [];

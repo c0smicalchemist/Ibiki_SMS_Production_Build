@@ -104,7 +104,6 @@ export default function MessageHistory() {
     staleTime: 30000,
     gcTime: 600000,
     placeholderData: (prev) => prev as any,
-    keepPreviousData: true,
   });
 
   // Mutation to refresh status
@@ -140,7 +139,7 @@ export default function MessageHistory() {
     }
   });
 
-  const messages = messagesData?.messages || [];
+  const messages = (messagesData as any)?.messages || [];
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkNumbers, setBulkNumbers] = useState<string[]>([]);
   const [idsOpen, setIdsOpen] = useState(false);

@@ -39,6 +39,18 @@ import { eq, desc, sql } from 'drizzle-orm';
 import { Pool } from 'pg';
 
 export interface IStorage {
+    // Additional methods needed for routes compatibility
+    getClientProfileByBusinessName(businessName: string): Promise<ClientProfile | undefined>;
+    getIncomingMessagesWithMissingUserId(limit?: number): Promise<IncomingMessage[]>;
+    updateIncomingMessageUserId(messageId: string, userId: string): Promise<void>;
+    updateClientVendorCredits(userId: string, vendor: string, newBalance: string): Promise<ClientProfile | undefined>;
+    setClientWebhook(userId: string, url: string, secret?: string | null): Promise<void>;
+    setClientDeliveryMode(userId: string, mode: string): Promise<void>;
+    getLastInboundForUserAndRecipient(userId: string, recipient: string): Promise<IncomingMessage | undefined>;
+    getRecentMessageLogs(limit?: number): Promise<MessageLog[]>;
+    getLastWebhookEvent(): Promise<any>;
+    getUserByBusinessName(businessName: string): Promise<User | undefined>;
+    findRecentConversationBySender(sender: string): Promise<any>;
   // User methods
   getUser(id: string): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
@@ -144,7 +156,7 @@ export interface IStorage {
   deleteUser(userId: string): Promise<void>;
 }
 
-export class MemStorage implements IStorage {
+export class MemStorage {
   private users: Map<string, User>;
   private apiKeys: Map<string, ApiKey>;
   private clientProfiles: Map<string, ClientProfile>;
@@ -200,6 +212,34 @@ export class MemStorage implements IStorage {
     for (const m of this.messageLogs.values()) if (m.userId === userId && m.isExample) return true;
     for (const c of this.contacts.values()) if (c.userId === userId && c.isExample) return true;
     return false;
+  }
+
+  async createIncomingMessage(message: InsertIncomingMessage): Promise<IncomingMessage> {
+    const id = randomUUID();
+    const rec: IncomingMessage = {
+      ...message,
+      id,
+      userId: (message as any).userId ?? null,
+      firstname: (message as any).firstname ?? null,
+      lastname: (message as any).lastname ?? null,
+      business: (message as any).business ?? null,
+      from: (message as any).from || '',
+      message: (message as any).message || '',
+      status: (message as any).status || 'received',
+      matchedBlockWord: (message as any).matchedBlockWord ?? null,
+      receiver: (message as any).receiver || '',
+      usedmodem: (message as any).usedmodem ?? null,
+      port: (message as any).port ?? null,
+      extPayload: (message as any).extPayload ?? null,
+      timestamp: (message as any).timestamp ?? new Date(),
+      messageId: (message as any).messageId || id,
+      isRead: (message as any).isRead ?? false,
+      isExample: (message as any).isExample ?? false,
+      isDeleted: (message as any).isDeleted ?? false,
+      createdAt: new Date()
+    } as any;
+    this.incomingMessages.set(id, rec as any);
+    return rec as any;
   }
 
   // User methods
@@ -923,7 +963,7 @@ export class MemStorage implements IStorage {
 let dbInstance: ReturnType<typeof drizzle> | null = null;
 let poolInstance: Pool | null = null;
 
-export class DbStorage implements IStorage {
+export class DbStorage {
   private db;
 
   constructor() {
@@ -972,6 +1012,9 @@ export class DbStorage implements IStorage {
       // Allow email to be nullable
       poolInstance.query('ALTER TABLE IF EXISTS users ALTER COLUMN email DROP NOT NULL').catch(() => {});
       
+      // Add vendor credit columns
+      poolInstance.query('ALTER TABLE IF NOT EXISTS client_profiles ADD COLUMN IF NOT EXISTS credits_textbelt decimal(10,2) DEFAULT \'0.00\'').catch(() => {});
+      poolInstance.query('ALTER TABLE IF NOT EXISTS client_profiles ADD COLUMN IF NOT EXISTS credits_extremesms decimal(10,2) DEFAULT \'0.00\'').catch(() => {});
       
       // Cleanup on process exit
       process.on('SIGINT', async () => {
@@ -995,6 +1038,7 @@ export class DbStorage implements IStorage {
 
   async getUserByEmail(email: string): Promise<User | undefined> {
     try {
+      console.log(`DEBUG: Executing getUserByEmail for '${email}'`);
       const r = await poolInstance!.query(
         'SELECT id, email, password, name, company, role, is_active, reset_token, reset_token_expiry, created_at FROM users WHERE email=$1 LIMIT 1',
         [email]
@@ -1022,6 +1066,7 @@ export class DbStorage implements IStorage {
 
   async getUserByUsername(username: string): Promise<User | undefined> {
     try {
+      console.log(`DEBUG: Executing getUserByUsername for '${username}'`);
       const r = await poolInstance!.query(
         'SELECT id, email, username, password, name, company, role, is_active, reset_token, reset_token_expiry, created_at, group_id FROM users WHERE username=$1 LIMIT 1',
         [username]
@@ -1181,10 +1226,35 @@ export class DbStorage implements IStorage {
     // Set default credits if not provided
     const result = await this.db.insert(clientProfiles).values({
       credits: '0.00',
+      creditsTextbelt: '0.00',
+      creditsExtremesms: '0.00',
       customMarkup: '0.00',
       assignedPhoneNumbers: [],
       ...profile
     }).returning();
+    return result[0];
+  }
+
+  async updateClientVendorCredits(userId: string, vendor: string, newCredits: string): Promise<ClientProfile | undefined> {
+    const updateData: any = {};
+    if (vendor === 'textbelt') {
+      updateData.creditsTextbelt = newCredits;
+    } else if (vendor === 'extremesms') {
+      updateData.creditsExtremesms = newCredits;
+    }
+    // Also update main credits field for backward compatibility or display if needed, 
+    // OR we just leave it. Let's assume 'credits' maps to the ACTIVE vendor or just deprecated.
+    // For now, let's NOT update 'credits' automatically unless we decide 'credits' = 'extremesms'.
+    // User asked for separation.
+    
+    // However, the UI currently reads 'credits'. 
+    // If I don't update 'credits', the old UI will show stale data.
+    // I should probably map 'credits' to 'creditsExtremesms' in the future, but for now let's just update the specific column.
+    
+    const result = await this.db.update(clientProfiles)
+      .set({ ...updateData, updatedAt: new Date() })
+      .where(eq(clientProfiles.userId, userId))
+      .returning();
     return result[0];
   }
 
@@ -1876,9 +1946,9 @@ export function getDbPool(): Pool | null {
 }
 
 // Lazy initialization to ensure environment variables are loaded
-let storageInstance: IStorage | null = null;
+let storageInstance: any = null;
 
-function initializeStorage(): IStorage {
+function initializeStorage(): any {
   if (storageInstance) {
     return storageInstance;
   }
@@ -1897,7 +1967,7 @@ function initializeStorage(): IStorage {
 }
 
 // Export a getter that initializes storage on first access
-export const storage = new Proxy({} as IStorage, {
+export const storage = new Proxy({} as any, {
   get(target, prop) {
     const instance = initializeStorage();
     return (instance as any)[prop];

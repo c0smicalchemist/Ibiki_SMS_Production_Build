@@ -57,9 +57,8 @@ export default function MessageActivityViewer({ mode = 'admin' }: { mode?: 'admi
     staleTime: 30000,
     gcTime: 600000,
     placeholderData: (prev) => prev as any,
-    keepPreviousData: true,
   });
-  const logs = data?.messages || [];
+  const logs = (data as any)?.messages || [];
   // Best-effort mapping: if display fields missing, try to map via /api/admin/clients
   const adminMapQuery = useQuery<{ success: boolean; clients: Array<{ id: string; email: string; name?: string | null }> }>({
     queryKey: ['/api/admin/clients'],

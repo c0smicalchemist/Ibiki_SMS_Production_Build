@@ -1,2 +1,0 @@
-perl -0777 -i -pe "s/app\.get\(\"\/api\/admin\/clients\", authenticateToken, requireAdmin,/app.get(\"\/api\/admin\/clients\", authenticateToken, requireRole([\"admin\",\"supervisor\"]),/g" /opt/ibiki-sms/server/routes.ts
-perl -0777 -i -pe "s/app\.post\('\/api\/admin\/users\/:userId\/reset-password'\, authenticateToken\, requireAdmin,/app.post('\/api\/admin\/users\/:userId\/reset-password'\, authenticateToken\, requireRole(['admin','supervisor']),/g" /opt/ibiki-sms/server/routes.ts

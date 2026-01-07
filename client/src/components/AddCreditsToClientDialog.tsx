@@ -21,9 +21,10 @@ interface AddCreditsToClientDialogProps {
   triggerLabel?: string;
   buttonClassName?: string;
   buttonVariant?: "default" | "destructive" | "outline" | "secondary" | "ghost";
+  vendor?: string;
 }
 
-export function AddCreditsToClientDialog({ clientId, clientName, currentCredits, groupId, showUSD = true, showAvailableRemaining = false, triggerMode, triggerLabel, buttonClassName, buttonVariant = "outline" }: AddCreditsToClientDialogProps) {
+export function AddCreditsToClientDialog({ clientId, clientName, currentCredits, groupId, showUSD = true, showAvailableRemaining = false, triggerMode, triggerLabel, buttonClassName, buttonVariant = "outline", vendor }: AddCreditsToClientDialogProps) {
   const [open, setOpen] = useState(false);
   const [amount, setAmount] = useState("");
   const [operation, setOperation] = useState<"add" | "deduct">("add");
@@ -66,7 +67,7 @@ export function AddCreditsToClientDialog({ clientId, clientName, currentCredits,
   };
 
   const addCreditsMutation = useMutation({
-    mutationFn: async (data: { userId: string; amount: string; operation: "add" | "deduct" }) => {
+    mutationFn: async (data: { userId: string; amount: string; operation: "add" | "deduct"; vendor?: string }) => {
       return await apiRequest('/api/admin/adjust-credits', {
         method: 'POST',
         body: JSON.stringify(data)
@@ -126,7 +127,7 @@ export function AddCreditsToClientDialog({ clientId, clientName, currentCredits,
       return;
     }
 
-    addCreditsMutation.mutate({ userId: clientId, amount, operation });
+    addCreditsMutation.mutate({ userId: clientId, amount, operation, vendor });
   };
 
   return (

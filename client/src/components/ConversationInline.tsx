@@ -42,16 +42,15 @@ export default function ConversationInline({ phoneNumber, userId, isAdmin, inbox
     staleTime: 30000,
     gcTime: 600000,
     placeholderData: (prev) => prev,
-    keepPreviousData: true,
   });
 
   const lastInbound = (() => {
-    const inc = conversationData?.conversation?.incoming || [];
+    const inc = (conversationData as any)?.conversation?.incoming || [];
     return inc.length ? inc[inc.length - 1] : null;
   })();
 
   const business = (() => {
-    const inc = conversationData?.conversation?.incoming || [];
+    const inc = (conversationData as any)?.conversation?.incoming || [];
     for (let i = inc.length - 1; i >= 0; i--) {
       const b = inc[i]?.business;
       if (b) return String(b);
@@ -60,7 +59,7 @@ export default function ConversationInline({ phoneNumber, userId, isAdmin, inbox
   })();
 
   const senderAssigned = (() => {
-    const out = conversationData?.conversation?.outgoing || [];
+    const out = (conversationData as any)?.conversation?.outgoing || [];
     for (let i = out.length - 1; i >= 0; i--) {
       const s = out[i]?.senderPhoneNumber || (() => {
         try {
@@ -76,8 +75,8 @@ export default function ConversationInline({ phoneNumber, userId, isAdmin, inbox
   })();
 
   const hasBlacklisted = (() => {
-    const inc = conversationData?.conversation?.incoming || [];
-    const out = conversationData?.conversation?.outgoing || [];
+    const inc = (conversationData as any)?.conversation?.incoming || [];
+    const out = (conversationData as any)?.conversation?.outgoing || [];
     const anyInc = inc.some((m: any) => /blacklist|blocked/i.test(String(m.status||'')) || !!m.matchedBlockWord);
     const anyOut = out.some((m: any) => /blacklist|blocked/i.test(String(m.status||'')));
     return anyInc || anyOut;
@@ -116,8 +115,8 @@ export default function ConversationInline({ phoneNumber, userId, isAdmin, inbox
   }, [conversationData]);
 
   const messages: Message[] = [];
-  const conversationIncoming = (conversationData?.conversation?.incoming || []).map((msg: any) => ({ ...msg, type: 'incoming' as const, timestamp: msg.timestamp, status: msg.status }));
-  const conversationOutgoing = (conversationData?.conversation?.outgoing || []).map((msg: any) => {
+  const conversationIncoming = ((conversationData as any)?.conversation?.incoming || []).map((msg: any) => ({ ...msg, type: 'incoming' as const, timestamp: msg.timestamp, status: msg.status }));
+  const conversationOutgoing = ((conversationData as any)?.conversation?.outgoing || []).map((msg: any) => {
       const safeParse = (v: any) => { try { return typeof v === 'string' ? JSON.parse(v || '') : v; } catch { return null; } };
       const findMessage = (obj: any): string | null => {
         if (!obj || typeof obj !== 'object') return null;

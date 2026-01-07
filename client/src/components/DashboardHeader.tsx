@@ -95,6 +95,7 @@ export function DashboardHeader() {
   };
 
   function formatHMS(s: number) {
+    if (isNaN(s)) return "00:00:00";
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
     const sec = s % 60;
@@ -121,24 +122,30 @@ export function DashboardHeader() {
   }
 
   function secondsUntil(tz: string, targetHour: number, targetMinute: number) {
-    const now = getHMSInZone(tz);
-    const nowSec = now.hour * 3600 + now.minute * 60 + now.second;
-    const targetSec = targetHour * 3600 + targetMinute * 60;
-    let diff = targetSec - nowSec;
-    if (diff <= 0) diff += 24 * 3600;
-    return diff;
+    try {
+      const now = getHMSInZone(tz);
+      const nowSec = now.hour * 3600 + now.minute * 60 + now.second;
+      const targetSec = targetHour * 3600 + targetMinute * 60;
+      let diff = targetSec - nowSec;
+      if (diff <= 0) diff += 24 * 3600;
+      return diff;
+    } catch { return 0; }
   }
 
   useEffect(() => {
     const calc = () => {
-      const pst = getHourInZone('America/Los_Angeles');
-      const est = getHourInZone('America/New_York');
-      const afterPst9 = pst.hour >= 9;
-      const beforeEst20 = est.hour < 20;
-      const open = afterPst9 && beforeEst20;
-      setRoutesOpen(open);
-      const next = open ? secondsUntil('America/New_York', 20, 0) : secondsUntil('America/Los_Angeles', 9, 0);
-      setCountdown(next);
+      try {
+        const pst = getHourInZone('America/Los_Angeles');
+        const est = getHourInZone('America/New_York');
+        const afterPst9 = pst.hour >= 9;
+        const beforeEst20 = est.hour < 20;
+        const open = afterPst9 && beforeEst20;
+        setRoutesOpen(open);
+        const next = open ? secondsUntil('America/New_York', 20, 0) : secondsUntil('America/Los_Angeles', 9, 0);
+        setCountdown(next);
+      } catch (e) {
+        console.error("Timer error:", e);
+      }
     };
     calc();
     const id = setInterval(calc, 1000);
@@ -167,29 +174,29 @@ export function DashboardHeader() {
           })()}
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 whitespace-nowrap" data-testid="routes-status">
             {routesOpen ? (
               <div className="flex items-center gap-3">
-                <span className="text-xs md:text-sm font-semibold text-green-600">{t('status.routesOpen')} (9:00AM GMT-8)</span>
-                <span className="text-xs text-muted-foreground">{t('status.closesIn')}: {formatHMS(countdown)}</span>
+                <span className="text-xs md:text-sm font-semibold text-green-600">{t('status.routesOpen') || 'Routes Open'} (9:00AM GMT-8)</span>
+                <span className="text-xs text-muted-foreground hidden sm:inline">{t('status.closesIn') || 'Closes in'}: {formatHMS(countdown)}</span>
               </div>
             ) : (
               <div className="flex items-center gap-3">
-                <span className="text-xs md:text-sm font-semibold text-red-600">{t('status.routesClosed')} (8:00PM GMT-5)</span>
+                <span className="text-xs md:text-sm font-semibold text-red-600">{t('status.routesClosed') || 'Routes Closed'} (8:00PM GMT-5)</span>
                 <Dialog>
                   <DialogTrigger asChild>
-                    <Button variant="ghost" size="icon" className="text-red-600" aria-label="Routes Closed help">
+                    <Button variant="ghost" size="icon" className="text-red-600 h-6 w-6" aria-label="Routes Closed help">
                       <HelpCircle className="h-4 w-4" />
                     </Button>
                   </DialogTrigger>
                   <DialogContent>
                     <DialogHeader>
-                      <DialogTitle>{t('admin.systemStatus.help.title')}</DialogTitle>
-                      <DialogDescription>{t('admin.systemStatus.help.description')}</DialogDescription>
+                      <DialogTitle>{t('admin.systemStatus.help.title') || 'System Status Help'}</DialogTitle>
+                      <DialogDescription>{t('admin.systemStatus.help.description') || 'Routes are open from 9:00 AM PST to 8:00 PM EST.'}</DialogDescription>
                     </DialogHeader>
                   </DialogContent>
                 </Dialog>
-                <span className="text-xs text-muted-foreground">{t('status.opensIn')}: {formatHMS(countdown)}</span>
+                <span className="text-xs text-muted-foreground hidden sm:inline">{t('status.opensIn') || 'Opens in'}: {formatHMS(countdown)}</span>
               </div>
             )}
           </div>

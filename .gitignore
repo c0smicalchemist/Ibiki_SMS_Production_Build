@@ -21,6 +21,10 @@ build/
 !.env.example
 !.env.sample
 
+# Deployment credentials (NEVER COMMIT)
+.deployment-credentials
+deploy-production.log
+
 # Logs
 logs/
 *.log

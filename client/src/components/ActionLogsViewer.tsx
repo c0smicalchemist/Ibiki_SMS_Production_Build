@@ -38,9 +38,8 @@ export default function ActionLogsViewer() {
     staleTime: 30000,
     gcTime: 600000,
     placeholderData: (prev) => prev as any,
-    keepPreviousData: true,
   });
-  const logs = data?.logs || [];
+  const logs = (data as any)?.logs || [];
   const filtered = logs.filter((l) => {
     const s = q.trim().toLowerCase();
     if (!s) return true;

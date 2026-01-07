@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Users, Settings, Activity, ArrowLeft, Wallet, Copy, CheckCircle, Send, Inbox as InboxIcon, Clock, Star, Smartphone, MessageSquare, HelpCircle } from "lucide-react";
+import { Users, Settings, Activity, ArrowLeft, Wallet, Copy, CheckCircle, Send, Inbox as InboxIcon, Clock, Star, Smartphone, MessageSquare, HelpCircle, Eye, EyeOff, Download } from "lucide-react";
 import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -20,6 +20,7 @@ import { useLanguage } from "@/contexts/LanguageContext";
 import { DashboardHeader } from "@/components/DashboardHeader";
 import { Link } from "wouter";
 import ApiTestUtility from "@/components/ApiTestUtility";
+import VendorApiTesting from "@/components/VendorApiTesting";
 import ErrorLogsViewer from "@/components/ErrorLogsViewer";
 import ActionLogsViewer from "@/components/ActionLogsViewer";
 import MessageActivityViewer from "@/components/MessageActivityViewer";
@@ -31,84 +32,15 @@ import WebhookEditDialog from "@/components/WebhookEditDialog";
 import { WorldClock } from "@/components/WorldClock";
 import { MessageStatusChart } from "@/components/MessageStatusChart";
 import MessageStatusTiles from "@/components/MessageStatusTiles";
+import SmsVendorManager from "@/components/SmsVendorManager";
 
-// Vendor management component
-function VendorManager() {
-  const { t } = useLanguage();
-  const [vendors, setVendors] = useState<any[]>([]);
-  const [activeVendor, setActiveVendor] = useState<string>('');
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    fetchVendors();
-  }, []);
-
-  const fetchVendors = async () => {
-    try {
-      const response = await api.get('/api/vendors');
-      if (response.data.success) {
-        setVendors(response.data.vendors);
-        setActiveVendor(response.data.activeVendor);
-      }
-    } catch (error) {
-      console.error('Failed to fetch vendors:', error);
-    }
-  };
-
-  const switchVendor = async (vendorId: string) => {
-    setLoading(true);
-    try {
-      const response = await api.post('/api/vendors/switch', { vendorId });
-      if (response.data.success) {
-        setActiveVendor(vendorId);
-        toast({ title: 'Success', description: `Switched to ${vendorId}`, variant: 'default' });
-        fetchVendors(); // Refresh vendor health
-      }
-    } catch (error: any) {
-      toast({ title: 'Error', description: error.response?.data?.error || 'Failed to switch vendor', variant: 'destructive' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>SMS Vendor Management</CardTitle>
-        <CardDescription>Switch between SMS providers</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-4">
-          {vendors.map((vendor) => (
-            <div key={vendor.id} className="flex items-center justify-between p-3 border rounded-lg">
-              <div className="flex items-center space-x-3">
-                <div className={`w-3 h-3 rounded-full ${vendor.health.healthy ? 'bg-green-500' : 'bg-red-500'}`} />
-                <div>
-                  <p className="font-medium">{vendor.name}</p>
-                  <p className="text-sm text-muted-foreground">
-                    {vendor.health.healthy ? 'Healthy' : vendor.health.reason || 'Unhealthy'}
-                  </p>
-                </div>
-              </div>
-              <Button
-                variant={activeVendor === vendor.id ? "default" : "outline"}
-                onClick={() => switchVendor(vendor.id)}
-                disabled={loading || !vendor.health.healthy}
-                size="sm"
-              >
-                {activeVendor === vendor.id ? 'Active' : 'Switch'}
-              </Button>
-            </div>
-          ))}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
+// Vendor management component removed per user request
+// function VendorManager() { ... }
 
 export default function AdminDashboard() {
   const { toast } = useToast();
   const { t } = useLanguage();
+  const [showApiKey, setShowApiKey] = useState(false);
   const [extremeApiKey, setExtremeApiKey] = useState("");
   const [extremeCost, setExtremeCost] = useState("0.01");
   const [clientRate, setClientRate] = useState("0.02");
@@ -146,7 +78,7 @@ export default function AdminDashboard() {
   ];
 
   const { data: config } = useQuery<{ success: boolean; config: Record<string, string> }>({ queryKey: ['/api/admin/config'] });
-  const { data: profile } = useQuery<{ user: { id: string; role: string } }>({ queryKey: ['/api/client/profile'] });
+  const { data: profile, isLoading: profileLoading, error: profileError } = useQuery<{ user: { id: string; role: string; email?: string } }>({ queryKey: ['/api/client/profile'] });
   const [routeOverride, setRouteOverride] = useState<boolean>(false);
   const [routesOpen, setRoutesOpen] = useState<boolean>(true);
   const [countdown, setCountdown] = useState<number>(0);
@@ -413,12 +345,26 @@ export default function AdminDashboard() {
     }
   });
 
+  const [diagnosticsEnabled, setDiagnosticsEnabled] = useState(false);
+  const [lastRunTime, setLastRunTime] = useState<Date | null>(null);
+  
   const diagnosticsQuery = useQuery<{ success: boolean; summary: any; checks: Array<{ name: string; status: string; details: any; durationMs: number }> }>({
     queryKey: ['/api/admin/diagnostics/run'],
-    staleTime: 0,
-    gcTime: 0,
+    enabled: diagnosticsEnabled,
+    staleTime: 30000,  // Cache for 30 seconds
+    gcTime: 300000,    // Keep for 5 minutes
+    refetchOnWindowFocus: false,
+    onSuccess: () => {
+      setLastRunTime(new Date());
+    }
   });
   const phraserConfigQuery = useQuery<{ success: boolean; provider: string; model: string; keyPresent: boolean; rules: any }>({ queryKey: ['/api/admin/paraphraser/config'] });
+  
+  const uptimeQuery = useQuery<{ success: boolean; uptime: { current: number; startTime: string; uptime24h: number; uptime7d: number; uptime30d: number; restarts24h: number; avgResponseTime: number; errorRate: number; memory: any; nodeVersion: string } }>({
+    queryKey: ['/api/admin/system/uptime'],
+    refetchInterval: 30000, // Refresh every 30 seconds
+  });
+  
   const rotateSecretMutation = useMutation({
     mutationFn: async (key: string) => {
       return await apiRequest('/api/admin/secrets/rotate', { method: 'POST', body: JSON.stringify({ key }) });
@@ -470,6 +416,8 @@ export default function AdminDashboard() {
     isActive?: boolean;
     messagesSent: number;
     credits: string;
+    creditsTextbelt?: string;
+    creditsExtremesms?: string;
     lastActive: string;
     assignedPhoneNumbers: string[];
     rateLimitPerMinute: number;
@@ -618,8 +566,10 @@ export default function AdminDashboard() {
     }
   });
 
-  const { data: statsData } = useQuery<{ success: boolean; totalMessages: number; totalClients: number }>({
-    queryKey: ['/api/admin/stats']
+  const { data: statsData } = useQuery<{ success: boolean; totalMessages: number; totalClients: number; restarts?: number }>({
+    queryKey: ['/api/admin/stats'],
+    staleTime: 30000, // Cache for 30 seconds to prevent excessive re-renders
+    refetchOnWindowFocus: false
   });
 
   const { data: recentActivity } = useQuery<{ 
@@ -647,13 +597,31 @@ export default function AdminDashboard() {
     retry: 2
   });
 
+  const { data: vendorBalanceData, isLoading: vendorBalanceLoading } = useQuery<{ 
+    success: boolean; 
+    balance: number;
+    vendor: string;
+    vendorName: string;
+  }>({
+    queryKey: ['/api/admin/vendor-balance'],
+    refetchInterval: 30000, // Auto-refresh every 30 seconds
+    retry: 2
+  });
+
   const clients = clientsData?.clients || [];
   const isSupervisor = profile?.user?.role === 'supervisor';
   const totalMessages = statsData?.totalMessages || 0;
   const totalClients = statsData?.totalClients || clients.length;
   const extremeBalance = balanceData?.balance ?? null;
   const balanceCurrency = balanceData?.currency || 'USD';
-  const sumCredits = clients.reduce((sum, c) => sum + (parseFloat(c.credits || '0') || 0), 0);
+  const activeVendor = vendorBalanceData?.vendor || 'textbelt';
+  const vendorBalance = vendorBalanceData?.balance ?? 0;
+  const getClientCredits = (c: any) => {
+    if (activeVendor === 'textbelt') return parseFloat(c.creditsTextbelt || '0');
+    if (activeVendor === 'extremesms') return parseFloat(c.creditsExtremesms || '0');
+    return parseFloat(c.credits || '0');
+  };
+  const sumCredits = clients.reduce((sum, c) => sum + (getClientCredits(c) || 0), 0);
   const myGroupId = clients.find(c => c.id === profile?.user?.id)?.groupId || null;
   // Group pool from system_config (fallback to sum of supervisor credits)
   const { data: groupPool } = useQuery<{ success: boolean; groupId: string; credits: number | null } | { success: boolean; pools: Array<{ groupId: string; credits: number }> }>({
@@ -671,10 +639,10 @@ export default function AdminDashboard() {
     ? groupPoolCredits
     : clients
       .filter(c => c.groupId && myGroupId && c.groupId === myGroupId && c.role === 'supervisor')
-      .reduce((sum, c) => sum + (parseFloat(c.credits || '0') || 0), 0);
+      .reduce((sum, c) => sum + (getClientCredits(c) || 0), 0);
   const groupClientCredits = clients
     .filter(c => c.groupId && myGroupId && c.groupId === myGroupId && c.role !== 'supervisor')
-    .reduce((sum, c) => sum + (parseFloat(c.credits || '0') || 0), 0);
+    .reduce((sum, c) => sum + (getClientCredits(c) || 0), 0);
   const groupRemainingCredits = Math.max(groupSupervisorCredits - groupClientCredits, 0);
   const clientRateNumber = parseFloat(clientRate || config?.config?.client_rate_per_sms || '0') || 0;
   const creditsValueUSD = (sumCredits * clientRateNumber).toFixed(2);
@@ -887,12 +855,13 @@ export default function AdminDashboard() {
             title={t('admin.stats.systemStatus')}
             value={t('admin.stats.healthy')}
             icon={Settings}
+            description={`${vendorBalanceData?.vendorName ? `Vendor: ${vendorBalanceData.vendorName}` : 'No vendor'}${statsData?.restarts !== undefined ? ` • Restarts: ${statsData.restarts}` : ''}`}
           />
           <StatCard
             title={'User'}
-            value={(profile as any)?.user?.email || profile?.user?.id || ''}
+            value={profileLoading ? 'Loading...' : (profileError ? 'Connection Error' : ((profile as any)?.user?.email || profile?.user?.id || 'Unknown'))}
             icon={Users}
-            description={'Logged in account'}
+            description={profileLoading ? 'Fetching profile...' : (profileError ? 'Retry needed' : `Logged in as ${(profile as any)?.user?.role || 'user'}`)}
           />
           <Card className="md:col-span-2 lg:col-span-4">
             <CardContent className="p-6">
@@ -926,37 +895,75 @@ export default function AdminDashboard() {
                 </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mt-4">
                 <div>
-                  <p className="text-xs text-muted-foreground">IbikiSMS Balance</p>
+                  <p className="text-xs text-muted-foreground">{vendorBalanceData?.vendorName || 'Vendor'} Balance</p>
                   <p className="text-2xl font-bold tracking-tight mt-1">
                     {isSupervisor
                       ? `${groupSupervisorCredits.toFixed(2)} credits`
-                      : (balanceLoading ? 'Loading...' : balanceError ? 'Unavailable' : (
-                          extremeBalance !== null ? `${extremeBalance.toLocaleString()} credits` : 'N/A'
+                      : (vendorBalanceLoading ? 'Loading...' : vendorBalanceData?.success ? (
+                          `${vendorBalanceData.balance.toLocaleString()} credits`
+                        ) : (
+                          'Loading...'
                         ))}
                   </p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    {isSupervisor ? 'Pooled balance for supervisors in your group' : 'Current account balance'}
+                    {isSupervisor ? 'Pooled balance for supervisors in your group' : `Current ${vendorBalanceData?.vendorName || 'vendor'} balance`}
                   </p>
-                  <p className="text-xs text-muted-foreground mt-1">SMS capacity: {isSupervisor ? Math.floor(groupSupervisorCredits).toLocaleString() : (extremeBalance !== null ? Math.floor(extremeBalance).toLocaleString() : '0')} messages</p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground">Allocated Credits</p>
-                  <p className={`text-2xl font-bold tracking-tight mt-1 ${isSupervisor ? 'text-green-600' : (extremeBalance !== null && Math.abs((extremeBalance - sumCredits)) <= 0.01 ? 'text-green-600' : 'text-red-600')}`}>
-                    {(isSupervisor ? groupClientCredits : sumCredits).toFixed(2)} credits
+                  <p className="text-xs text-muted-foreground mt-1">
+                    SMS capacity: {isSupervisor ? Math.floor(groupSupervisorCredits).toLocaleString() : (
+                      vendorBalanceData?.success ? Math.floor(vendorBalanceData.balance).toLocaleString() : '0'
+                    )} messages
                   </p>
-                  <p className="text-xs text-muted-foreground mt-1">Sum of all client credits</p>
-                  <p className="text-xs text-muted-foreground mt-1">SMS capacity: {Math.floor(isSupervisor ? groupClientCredits : sumCredits).toLocaleString()} messages</p>
+                  {!isSupervisor && (
+                    <p className="text-xs text-blue-600 mt-1">
+                      Active: {vendorBalanceData?.vendorName || 'Loading...'}
+                    </p>
+                  )}
                 </div>
-                <div>
-                  <p className="text-xs text-muted-foreground">Remaining Credits</p>
-                  <p className={`text-2xl font-bold tracking-tight mt-1 ${isSupervisor ? (groupRemainingCredits >= 0 ? 'text-green-600' : 'text-red-600') : (extremeBalance !== null && Math.abs((extremeBalance - sumCredits)) <= 0.01 ? 'text-green-600' : 'text-red-600')}`}>
-                    {isSupervisor
-                      ? `${groupRemainingCredits.toFixed(2)} credits`
-                      : (extremeBalance !== null ? `${Math.max(extremeBalance - sumCredits, 0).toFixed(2)} credits` : 'N/A')}
-                  </p>
-                  <p className={`text-xs mt-1 ${isSupervisor ? (groupRemainingCredits >= 0 ? 'text-green-700' : 'text-red-700') : (extremeBalance !== null && Math.abs((extremeBalance - sumCredits)) <= 0.01 ? 'text-green-700' : 'text-red-700')}`}>{isSupervisor ? 'Supervisor pooled minus allocated (group)' : (extremeBalance !== null && Math.abs((extremeBalance - sumCredits)) <= 0.01 ? 'In Sync' : 'Needs Reconcile')}</p>
-                  <p className="text-xs text-muted-foreground mt-1">SMS capacity: {isSupervisor ? Math.floor(groupRemainingCredits).toLocaleString() : (extremeBalance !== null ? Math.floor(Math.max(extremeBalance - sumCredits, 0)).toLocaleString() : '0')} messages</p>
-                </div>
+                {/* Credits Overview Section - Always Visible */}
+                {(true) && (
+                  <>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Allocated Credits</p>
+                      <p className={`text-2xl font-bold tracking-tight mt-1 ${isSupervisor ? 'text-green-600' : (extremeBalance !== null && Math.abs((extremeBalance - sumCredits)) <= 0.01 ? 'text-green-600' : 'text-red-600')}`}>
+                        {(isSupervisor ? groupClientCredits : sumCredits).toFixed(2)} credits
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">Sum of all client credits</p>
+                      <p className="text-xs text-muted-foreground mt-1">SMS capacity: {Math.floor(isSupervisor ? groupClientCredits : sumCredits).toLocaleString()} messages</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Remaining Credits</p>
+                      <p className={`text-2xl font-bold tracking-tight mt-1 ${
+                        isSupervisor 
+                          ? (groupRemainingCredits >= 0 ? 'text-green-600' : 'text-red-600') 
+                          : (vendorBalanceData?.success && vendorBalanceData.balance >= sumCredits ? 'text-green-600' : 'text-red-600')
+                      }`}>
+                        {isSupervisor
+                          ? `${groupRemainingCredits.toFixed(2)} credits`
+                          : (vendorBalanceData?.success 
+                              ? `${Math.max(vendorBalanceData.balance - sumCredits, 0).toFixed(2)} credits` 
+                              : '0.00 credits')}
+                      </p>
+                      <p className={`text-xs mt-1 ${
+                        isSupervisor 
+                          ? (groupRemainingCredits >= 0 ? 'text-green-700' : 'text-red-700') 
+                          : (vendorBalanceData?.success && Math.abs((vendorBalanceData.balance - sumCredits)) <= 0.01 ? 'text-green-700' : 'text-red-700')
+                      }`}>
+                        {isSupervisor 
+                          ? 'Supervisor pooled minus allocated (group)' 
+                          : (vendorBalanceData?.vendor === 'extremesms' 
+                              ? (extremeBalance !== null && Math.abs((extremeBalance - sumCredits)) <= 0.01 ? 'In Sync' : 'Needs Reconcile')
+                              : 'Vendor Balance - Allocated')}
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        SMS capacity: {isSupervisor 
+                          ? Math.floor(groupRemainingCredits).toLocaleString() 
+                          : (vendorBalanceData?.success 
+                              ? Math.floor(Math.max(vendorBalanceData.balance - sumCredits, 0)).toLocaleString() 
+                              : '0')} messages
+                      </p>
+                    </div>
+                  </>
+                )}
               </div>
               <div className="mt-3 p-3 rounded border bg-muted/40 text-xs text-muted-foreground">1 credit = 1 SMS. Capacity is based on credits only.</div>
               </CardContent>
@@ -1184,6 +1191,7 @@ export default function AdminDashboard() {
             {profile?.user?.role === 'admin' ? (
               <>
                 <TabsTrigger value="configuration" data-testid="tab-configuration">{t('admin.tabs.configuration')}</TabsTrigger>
+                <TabsTrigger value="sms-vendors" data-testid="tab-sms-vendors">SMS Vendors</TabsTrigger>
                 <TabsTrigger value="webhook" data-testid="tab-webhook">{t('admin.tabs.webhook')}</TabsTrigger>
                 <TabsTrigger value="testing" data-testid="tab-testing">{t('admin.tabs.testing')}</TabsTrigger>
                 <TabsTrigger value="monitoring" data-testid="tab-monitoring">{t('admin.tabs.monitoring')}</TabsTrigger>
@@ -1258,11 +1266,11 @@ export default function AdminDashboard() {
                       <TableCell className="py-2">
                         <div className="space-y-1">
                           <span className="font-mono font-semibold" data-testid={`text-credits-${client.id}`}>
-                            {parseFloat(client.credits || '0').toFixed(2)} credits
+                            {getClientCredits(client).toFixed(2)} credits
                           </span>
                           {profile?.user?.role === 'admin' && (
                             <div className="text-xs text-muted-foreground">
-                              ≈ ${ ( (parseFloat(client.credits || '0') || 0) * clientRateNumber ).toFixed(2) } USD
+                              ≈ ${ ( (getClientCredits(client) || 0) * clientRateNumber ).toFixed(2) } USD
                             </div>
                           )}
                         </div>
@@ -1423,7 +1431,7 @@ export default function AdminDashboard() {
                           <AddCreditsToClientDialog 
                             clientId={client.id}
                             clientName={client.name}
-                            currentCredits={client.credits}
+                            currentCredits={String(getClientCredits(client))}
                             groupId={client.groupId}
                             showUSD={profile?.user?.role === 'admin'}
                             showAvailableRemaining={profile?.user?.role === 'admin'}
@@ -1431,11 +1439,12 @@ export default function AdminDashboard() {
                             triggerLabel="$ Add"
                             buttonVariant="default"
                             buttonClassName="w-full h-7 justify-center bg-green-600 text-white hover:bg-green-700 border border-green-700 text-xs"
+                            vendor={vendorBalanceData?.vendor}
                           />
                           <AddCreditsToClientDialog 
                             clientId={client.id}
                             clientName={client.name}
-                            currentCredits={client.credits}
+                            currentCredits={String(getClientCredits(client))}
                             groupId={client.groupId}
                             showUSD={profile?.user?.role === 'admin'}
                             showAvailableRemaining={profile?.user?.role === 'admin'}
@@ -1443,6 +1452,7 @@ export default function AdminDashboard() {
                             triggerLabel="$ Deduct"
                             buttonVariant="outline"
                             buttonClassName="w-full h-7 justify-center bg-orange-100 text-orange-800 border border-orange-500 hover:bg-orange-200 text-xs"
+                            vendor={vendorBalanceData?.vendor}
                           />
                           {!(client.isActive ?? client.status === 'active') ? (
                             <Button
@@ -1651,11 +1661,29 @@ export default function AdminDashboard() {
             </CardHeader>
             <CardContent>
               <div className="flex items-center gap-2 mb-3">
-                <Button onClick={() => diagnosticsQuery.refetch?.()} data-testid="button-run-diagnostics">
+                <Button 
+                  onClick={() => {
+                    setDiagnosticsEnabled(true);
+                    diagnosticsQuery.refetch?.();
+                  }}
+                  data-testid="button-run-diagnostics"
+                >
                   {diagnosticsQuery.isFetching ? 'Running…' : 'Run Diagnostics'}
                 </Button>
+                {lastRunTime && (
+                  <Badge variant="outline" className="text-xs">
+                    Last run: {lastRunTime.toLocaleTimeString()}
+                  </Badge>
+                )}
                 {diagnosticsQuery.data && (
-                  <Button variant="outline" onClick={() => navigator.clipboard.writeText(JSON.stringify(diagnosticsQuery.data, null, 2))}>Copy JSON</Button>
+                  <>
+                    <Button variant="outline" onClick={() => navigator.clipboard.writeText(JSON.stringify(diagnosticsQuery.data, null, 2))}>Copy JSON</Button>
+                    <Badge 
+                      variant={diagnosticsQuery.data.summary.failCount === 0 ? "default" : "destructive"}
+                    >
+                      {diagnosticsQuery.data.summary.passCount} passed, {diagnosticsQuery.data.summary.failCount} failed
+                    </Badge>
+                  </>
                 )}
               </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -1677,7 +1705,6 @@ export default function AdminDashboard() {
         </TabsContent>
 
         <TabsContent value="configuration" className="space-y-4">
-          <VendorManager />
           <Card className="border border-border/60">
             <CardHeader>
               <CardTitle>{t('admin.config.title')}</CardTitle>
@@ -1689,14 +1716,27 @@ export default function AdminDashboard() {
               <form onSubmit={handleSaveConfig} className="space-y-6">
                 <div className="space-y-2">
                   <Label htmlFor="extremeApiKey">IbikiSMS API Key</Label>
-                  <Input
-                    id="extremeApiKey"
-                    type="password"
-                    placeholder="Enter IbikiSMS API key"
-                    value={extremeApiKey}
-                    onChange={(e) => setExtremeApiKey(e.target.value)}
-                    data-testid="input-extreme-api-key"
-                  />
+                  <div className="relative">
+                    <Input
+                      id="extremeApiKey"
+                      type={showApiKey ? "text" : "password"}
+                      placeholder="Enter IbikiSMS API key"
+                      value={extremeApiKey}
+                      onChange={(e) => setExtremeApiKey(e.target.value)}
+                      data-testid="input-extreme-api-key"
+                      className="pr-10"
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
+                      onClick={() => setShowApiKey(!showApiKey)}
+                      aria-label={showApiKey ? "Hide API key" : "Show API key"}
+                    >
+                      {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </Button>
+                  </div>
                   <p className="text-xs text-muted-foreground">
                     This key is used to authenticate with IbikiSMS on behalf of all clients
                   </p>
@@ -1924,28 +1964,28 @@ export default function AdminDashboard() {
                       <span className="text-sm">JWT Secret</span>
                       <div className="flex items-center gap-2">
                         {secretsStatusQuery.data?.configured?.jwt_secret ? <Badge>Configured</Badge> : <Badge variant="secondary">Not set</Badge>}
-                        {secretsStatusQuery.data?.envPresent?.JWT_SECRET ? <Badge>Env present</Badge> : <Badge variant="secondary">Env missing</Badge>}
+                        {(secretsStatusQuery.data as any)?.envPresent?.JWT_SECRET ? <Badge>Env present</Badge> : <Badge variant="secondary">Env missing</Badge>}
                       </div>
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="text-sm">Session Secret</span>
                       <div className="flex items-center gap-2">
                         {secretsStatusQuery.data?.configured?.session_secret ? <Badge>Configured</Badge> : <Badge variant="secondary">Not set</Badge>}
-                        {secretsStatusQuery.data?.envPresent?.SESSION_SECRET ? <Badge>Env present</Badge> : <Badge variant="secondary">Env missing</Badge>}
+                        {(secretsStatusQuery.data as any)?.envPresent?.SESSION_SECRET ? <Badge>Env present</Badge> : <Badge variant="secondary">Env missing</Badge>}
                       </div>
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="text-sm">Webhook Secret</span>
                       <div className="flex items-center gap-2">
                         {secretsStatusQuery.data?.configured?.webhook_secret ? <Badge>Configured</Badge> : <Badge variant="secondary">Not set</Badge>}
-                        {secretsStatusQuery.data?.envPresent?.WEBHOOK_SECRET ? <Badge>Env present</Badge> : <Badge variant="secondary">Env missing</Badge>}
+                        {(secretsStatusQuery.data as any)?.envPresent?.WEBHOOK_SECRET ? <Badge>Env present</Badge> : <Badge variant="secondary">Env missing</Badge>}
                       </div>
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="text-sm">Resend API Key</span>
                       <div className="flex items-center gap-2">
                         {secretsStatusQuery.data?.configured?.resend_api_key ? <Badge>Configured</Badge> : <Badge variant="secondary">Not set</Badge>}
-                        {secretsStatusQuery.data?.envPresent?.RESEND_API_KEY ? <Badge>Env present</Badge> : <Badge variant="secondary">Env missing</Badge>}
+                        {(secretsStatusQuery.data as any)?.envPresent?.RESEND_API_KEY ? <Badge>Env present</Badge> : <Badge variant="secondary">Env missing</Badge>}
                       </div>
                     </div>
                   </div>
@@ -1960,6 +2000,10 @@ export default function AdminDashboard() {
           </Card>
         </TabsContent>
 
+        <TabsContent value="sms-vendors" className="space-y-4">
+          <SmsVendorManager />
+        </TabsContent>
+
         <TabsContent value="webhook" className="space-y-4">
           {/* Docs content removed per request; leaving only diagnostics */}
 
@@ -1972,18 +2016,26 @@ export default function AdminDashboard() {
               <div className="p-3 mb-4 rounded border bg-muted/40">
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="text-sm font-semibold">ExtremeSMS Webhook URL</div>
-                    <div className="text-xs text-muted-foreground">Use this URL in ExtremeSMS so Ibiki can receive replies.</div>
+                    <div className="text-sm font-semibold">
+                      {(() => {
+                        const suggested = (secretsStatusQuery.data as any)?.suggestedWebhook || '';
+                        if (suggested.includes('/textbelt')) return 'TextBelt Webhook URL';
+                        return 'ExtremeSMS Webhook URL';
+                      })()}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      Use this URL in your SMS provider to receive replies to Ibiki inbox.
+                    </div>
                     <div className="mt-2 font-mono text-xs break-all" data-testid="text-suggested-webhook">
-                      {secretsStatusQuery.data?.suggestedWebhook || 'https://ibiki.run.place/api/webhook/extreme-sms'}
+                      {(secretsStatusQuery.data as any)?.suggestedWebhook || 'https://ibiki.run.place/api/webhook/extreme-sms'}
                     </div>
                     <div className="mt-1 text-xs">
-                      Configured: <span className="font-mono" data-testid="text-configured-webhook">{secretsStatusQuery.data?.configuredWebhook || '—'}</span>
+                      Configured: <span className="font-mono" data-testid="text-configured-webhook">{(secretsStatusQuery.data as any)?.configuredWebhook || '—'}</span>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Button variant="outline" onClick={() => navigator.clipboard.writeText(String(secretsStatusQuery.data?.suggestedWebhook || 'https://ibiki.run.place/api/webhook/extreme-sms'))} data-testid="button-copy-webhook">Copy</Button>
-                    <Button onClick={() => setWebhookUrlMutation.mutate(String(secretsStatusQuery.data?.suggestedWebhook || 'https://ibiki.run.place/api/webhook/extreme-sms'))} data-testid="button-set-webhook">Set Webhook URL</Button>
+                    <Button variant="outline" onClick={() => navigator.clipboard.writeText(String((secretsStatusQuery.data as any)?.suggestedWebhook || 'https://ibiki.run.place/api/webhook/extreme-sms'))} data-testid="button-copy-webhook">Copy</Button>
+                    <Button onClick={() => setWebhookUrlMutation.mutate(String((secretsStatusQuery.data as any)?.suggestedWebhook || 'https://ibiki.run.place/api/webhook/extreme-sms'))} data-testid="button-set-webhook">Set Webhook URL</Button>
                   </div>
                 </div>
               </div>
@@ -2042,6 +2094,7 @@ export default function AdminDashboard() {
         </TabsContent>
 
         <TabsContent value="testing" className="space-y-4">
+          <VendorApiTesting />
           <ApiTestUtility />
         </TabsContent>
 
@@ -2144,6 +2197,131 @@ export default function AdminDashboard() {
 
 
         <TabsContent value="monitoring" className="space-y-4">
+          {/* System Uptime Card */}
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle>System Health & Uptime</CardTitle>
+                  <CardDescription>Real-time server performance metrics</CardDescription>
+                </div>
+                <Button 
+                  variant="outline" 
+                  size="sm"
+                  onClick={() => uptimeQuery.refetch()}
+                >
+                  <Activity className="h-4 w-4 mr-2" />
+                  Refresh
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {uptimeQuery.data?.uptime && (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                  <div className="p-4 rounded-lg border bg-muted/40">
+                    <div className="text-2xl font-bold text-green-600">
+                      {uptimeQuery.data.uptime.uptime24h.toFixed(1)}%
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">Uptime (24h)</div>
+                  </div>
+                  <div className="p-4 rounded-lg border bg-muted/40">
+                    <div className="text-2xl font-bold text-green-600">
+                      {uptimeQuery.data.uptime.uptime7d.toFixed(1)}%
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">Uptime (7d)</div>
+                  </div>
+                  <div className="p-4 rounded-lg border bg-muted/40">
+                    <div className="text-2xl font-bold">
+                      {uptimeQuery.data.uptime.avgResponseTime}ms
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">Avg Response Time</div>
+                  </div>
+                  <div className="p-4 rounded-lg border bg-muted/40">
+                    <div className="text-2xl font-bold text-amber-600">
+                      {uptimeQuery.data.uptime.errorRate.toFixed(1)}%
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">Error Rate</div>
+                  </div>
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <span className="text-muted-foreground">Current Uptime:</span>
+                  <span className="ml-2 font-mono">
+                    {uptimeQuery.data?.uptime ? 
+                      `${Math.floor(uptimeQuery.data.uptime.current / 3600)}h ${Math.floor((uptimeQuery.data.uptime.current % 3600) / 60)}m` 
+                      : 'Loading...'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Server Started:</span>
+                  <span className="ml-2 font-mono">
+                    {uptimeQuery.data?.uptime?.startTime ? 
+                      new Date(uptimeQuery.data.uptime.startTime).toLocaleString() 
+                      : 'Loading...'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Node.js Version:</span>
+                  <span className="ml-2 font-mono">{uptimeQuery.data?.uptime?.nodeVersion || 'N/A'}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Memory Usage:</span>
+                  <span className="ml-2 font-mono">
+                    {uptimeQuery.data?.uptime?.memory ? 
+                      `${Math.round(uptimeQuery.data.uptime.memory.heapUsed / 1024 / 1024)}MB` 
+                      : 'N/A'}
+                  </span>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Export Logs Section */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Export Logs</CardTitle>
+              <CardDescription>Download logs in CSV format for analysis</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    const token = localStorage.getItem('token');
+                    window.open(`/api/admin/logs/export?type=action&token=${token}`, '_blank');
+                  }}
+                >
+                  <Download className="h-4 w-4 mr-2" />
+                  Export Action Logs
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    const token = localStorage.getItem('token');
+                    window.open(`/api/admin/logs/export?type=error&token=${token}`, '_blank');
+                  }}
+                >
+                  <Download className="h-4 w-4 mr-2" />
+                  Export Error Logs
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    const token = localStorage.getItem('token');
+                    window.open(`/api/admin/logs/export?type=messages&token=${token}`, '_blank');
+                  }}
+                >
+                  <Download className="h-4 w-4 mr-2" />
+                  Export Message Logs
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
           <Card>
             <CardHeader>
               <CardTitle>Recent API Activity</CardTitle>

@@ -1,17 +1,4 @@
-import dotenv from "dotenv";
-
-if (process.env.LOG_LEVEL === 'debug') {
-  console.log('🔧 Initial environment check:');
-  console.log('NODE_ENV:', process.env.NODE_ENV);
-  console.log('PORT:', process.env.PORT);
-  console.log('DATABASE_URL present:', !!process.env.DATABASE_URL);
-}
-
-const envFile = process.env.NODE_ENV === 'production' ? '.env.production' : '.env.development';
-dotenv.config({ path: envFile });
-if (process.env.NODE_ENV !== 'production') {
-  dotenv.config();
-}
+import "./env";
 
 // CRITICAL: Verify DATABASE_URL is set
 if (!process.env.DATABASE_URL) {
@@ -390,27 +377,36 @@ app.use((req, res, next) => {
     throw error;
   }
 
+  // Global error handling middleware (must be last)
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
 
-    res.status(status).json({ message });
-    throw err;
+    // Don't send response twice
+    if (!res.headersSent) {
+      res.status(status).json({ 
+        success: false,
+        error: message,
+        ...(process.env.NODE_ENV === "development" && { debug: err.stack })
+      });
+    }
   });
 
-  // Add debug route to see what routes are registered
-  app.get("/api/debug/routes", (req, res) => {
-    const routes = [];
-    app._router.stack.forEach((middleware) => {
-      if (middleware.route) {
-        routes.push({
-          path: middleware.route.path,
-          methods: Object.keys(middleware.route.methods)
-        });
-      }
+  // Add debug route to see what routes are registered (dev only)
+  if (process.env.NODE_ENV === "development") {
+    app.get("/api/debug/routes", (req, res) => {
+      const routes = [];
+      app._router.stack.forEach((middleware) => {
+        if (middleware.route) {
+          routes.push({
+            path: middleware.route.path,
+            methods: Object.keys(middleware.route.methods)
+          });
+        }
+      });
+      res.json({ routes, environment: process.env.NODE_ENV });
     });
-    res.json({ routes, environment: process.env.NODE_ENV });
-  });
+  }
 
   // importantly only setup vite in development and after
   // setting up all the other routes so the catch-all route
