@@ -41,7 +41,9 @@ export const apiKeys = pgTable("api_keys", {
 export const clientProfiles = pgTable("client_profiles", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }).unique(),
-  credits: decimal("credits", { precision: 10, scale: 2 }).notNull().default("0.00"),
+  credits: decimal("credits", { precision: 10, scale: 2 }).notNull().default("0.00"), // Legacy - prefer vendor-specific columns
+  creditsTextbelt: decimal("credits_textbelt", { precision: 10, scale: 2 }).notNull().default("0.00"),
+  creditsExtremesms: decimal("credits_extremesms", { precision: 10, scale: 2 }).notNull().default("0.00"),
   currency: text("currency").notNull().default("USD"),
   customMarkup: decimal("custom_markup", { precision: 10, scale: 4 }), // Optional custom markup for this client
   assignedPhoneNumbers: text("assigned_phone_numbers").array(), // Array of phone numbers assigned to this client for routing incoming SMS
