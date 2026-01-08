@@ -72,8 +72,11 @@ if (Test-Path "deploy-bundle.zip") { Remove-Item "deploy-bundle.zip" -Force }
 $assetCount = (Get-ChildItem "dist/public/assets" -File).Count
 Write-Host "    Found $assetCount assets to package" -ForegroundColor Gray
 
-# Create zip with ALL frontend files
-Compress-Archive -Path "dist/public/*" -DestinationPath "deploy-bundle.zip" -Force
+# Create zip from within dist/public to maintain correct paths (assets/filename.js)
+Push-Location "dist/public"
+Compress-Archive -Path "assets", "index.html", "favicon.png" -DestinationPath "../../deploy-bundle.zip" -Force
+Pop-Location
+
 $zipSize = [math]::Round((Get-Item "deploy-bundle.zip").Length / 1MB, 2)
 Write-OK "Created deploy-bundle.zip ($zipSize MB, $assetCount assets)"
 
@@ -111,18 +114,11 @@ if (-not $BackendOnly) {
     Write-Step "4/5" "Extracting assets on server..."
     
     # Clear old assets and extract new ones atomically
-    $extractCmd = @"
-cd /opt/ibiki-sms/dist/public && \
-rm -rf assets.backup 2>/dev/null; \
-mv assets assets.backup 2>/dev/null; \
-unzip -o /tmp/deploy-bundle.zip && \
-rm -rf assets.backup && \
-rm /tmp/deploy-bundle.zip && \
-echo "Extracted successfully"
-"@
+    # The zip now contains: assets/, index.html, favicon.png with proper paths
+    $extractCmd = "cd /opt/ibiki-sms/dist/public && rm -rf assets.backup 2>/dev/null && mv assets assets.backup 2>/dev/null && unzip -o /tmp/deploy-bundle.zip && rm -rf assets.backup && rm /tmp/deploy-bundle.zip && echo EXTRACTED_OK"
     
     $result = ssh "root@$Server" $extractCmd 2>&1
-    if ($result -match "Extracted successfully") {
+    if ($result -match "EXTRACTED_OK") {
         Write-OK "Assets extracted on server"
     } else {
         Write-Warn "Extraction may have had issues, restoring backup..."
