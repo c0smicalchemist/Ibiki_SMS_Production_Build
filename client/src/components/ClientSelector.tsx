@@ -114,26 +114,14 @@ export function ClientSelector({ onClientChange, selectedClientId, onAdminModeCh
                   textValue={client.name}
                 >
                   {`${client.name} (${client.email}) $${parseFloat(client.credits).toFixed(2)}`}
-                  {activeVendor && (
-                    <span className="text-xs text-muted-foreground ml-1">
-                      [{activeVendor.name}]
-                    </span>
-                  )}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
           {selectedClient && (
-            <div className="space-y-1">
-              <p className="text-xs text-muted-foreground">
-                All actions will be performed as <span className="font-medium">{selectedClient.name}</span>
-              </p>
-              {activeVendor && (
-                <p className="text-xs text-blue-600 dark:text-blue-400">
-                  💳 Credits shown for: <span className="font-semibold">{activeVendor.name}</span>
-                </p>
-              )}
-            </div>
+            <p className="text-xs text-muted-foreground">
+              All actions will be performed as <span className="font-medium">{selectedClient.name}</span>
+            </p>
           )}
         </div>
       )}
