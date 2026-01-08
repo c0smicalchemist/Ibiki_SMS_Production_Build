@@ -1186,32 +1186,94 @@ export default function AdminDashboard() {
         )}
 
         <Tabs defaultValue="clients" data-testid="tabs-admin">
-          <TabsList>
-            <TabsTrigger value="clients" data-testid="tab-clients">{t('admin.tabs.clients')}</TabsTrigger>
+          <TabsList className="flex flex-wrap h-auto gap-1 p-1">
+            {/* User Management Group */}
+            <TabsTrigger value="clients" data-testid="tab-clients" className="gap-1">
+              <Users className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">{t('admin.tabs.clients')}</span>
+            </TabsTrigger>
+            <TabsTrigger value="createuser" data-testid="tab-createuser" className="gap-1">
+              <Users className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Create</span>
+            </TabsTrigger>
+            {profile?.user?.role === 'admin' && (
+              <TabsTrigger value="usersummary" data-testid="tab-usersummary" className="gap-1">
+                <Users className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Summary</span>
+              </TabsTrigger>
+            )}
+            
+            {/* Divider */}
+            <div className="w-px h-6 bg-border mx-1 hidden md:block" />
+            
+            {/* Reports Group */}
+            <TabsTrigger value="messages" data-testid="tab-messages" className="gap-1">
+              <MessageSquare className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Messages</span>
+            </TabsTrigger>
+            <TabsTrigger value="actionlogs" data-testid="tab-actionlogs" className="gap-1">
+              <Activity className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Logs</span>
+            </TabsTrigger>
+            <TabsTrigger value="groupreport" data-testid="tab-groupreport" className="gap-1">
+              <Activity className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Report</span>
+            </TabsTrigger>
+
             {profile?.user?.role === 'admin' ? (
               <>
-                <TabsTrigger value="configuration" data-testid="tab-configuration">{t('admin.tabs.configuration')}</TabsTrigger>
-                <TabsTrigger value="sms-vendors" data-testid="tab-sms-vendors">SMS Vendors</TabsTrigger>
-                <TabsTrigger value="webhook" data-testid="tab-webhook">{t('admin.tabs.webhook')}</TabsTrigger>
-                <TabsTrigger value="testing" data-testid="tab-testing">{t('admin.tabs.testing')}</TabsTrigger>
-                <TabsTrigger value="monitoring" data-testid="tab-monitoring">{t('admin.tabs.monitoring')}</TabsTrigger>
-                <TabsTrigger value="actionlogs" data-testid="tab-actionlogs">{t('admin.actionLogs')}</TabsTrigger>
-                <TabsTrigger value="messages" data-testid="tab-messages">Message Activity</TabsTrigger>
-                <TabsTrigger value="createuser" data-testid="tab-createuser">{t('admin.tabs.createUser') || 'User Create'}</TabsTrigger>
-                <TabsTrigger value="phraser" data-testid="tab-phraser">Ibiki Phraser</TabsTrigger>
-                <TabsTrigger value="usersummary" data-testid="tab-usersummary">User Summary</TabsTrigger>
-                <TabsTrigger value="groupreport" data-testid="tab-groupreport">Group Report</TabsTrigger>
-                <TabsTrigger value="override" data-testid="tab-override">Override</TabsTrigger>
-                <TabsTrigger value="diagnostics" data-testid="tab-diagnostics">Diagnostics</TabsTrigger>
+                {/* Divider */}
+                <div className="w-px h-6 bg-border mx-1 hidden md:block" />
+                
+                {/* Settings Group */}
+                <TabsTrigger value="configuration" data-testid="tab-configuration" className="gap-1">
+                  <Settings className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Config</span>
+                </TabsTrigger>
+                <TabsTrigger value="sms-vendors" data-testid="tab-sms-vendors" className="gap-1">
+                  <Smartphone className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Vendors</span>
+                </TabsTrigger>
+                <TabsTrigger value="webhook" data-testid="tab-webhook" className="gap-1">
+                  <Activity className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Webhook</span>
+                </TabsTrigger>
+
+                {/* Divider */}
+                <div className="w-px h-6 bg-border mx-1 hidden md:block" />
+                
+                {/* Tools Group */}
+                <TabsTrigger value="testing" data-testid="tab-testing" className="gap-1">
+                  <Send className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Test</span>
+                </TabsTrigger>
+                <TabsTrigger value="phraser" data-testid="tab-phraser" className="gap-1">
+                  <MessageSquare className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Phraser</span>
+                </TabsTrigger>
+                <TabsTrigger value="override" data-testid="tab-override" className="gap-1">
+                  <Settings className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Override</span>
+                </TabsTrigger>
+
+                {/* Divider */}
+                <div className="w-px h-6 bg-border mx-1 hidden md:block" />
+                
+                {/* System Group */}
+                <TabsTrigger value="monitoring" data-testid="tab-monitoring" className="gap-1">
+                  <Activity className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Monitor</span>
+                </TabsTrigger>
+                <TabsTrigger value="diagnostics" data-testid="tab-diagnostics" className="gap-1">
+                  <HelpCircle className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Diag</span>
+                </TabsTrigger>
               </>
             ) : (
-              <>
-                <TabsTrigger value="actionlogs" data-testid="tab-actionlogs">{t('admin.actionLogs')}</TabsTrigger>
-                <TabsTrigger value="messages" data-testid="tab-messages">Message Activity</TabsTrigger>
-                <TabsTrigger value="createuser" data-testid="tab-createuser">{t('admin.tabs.createUser') || 'User Create'}</TabsTrigger>
-                <TabsTrigger value="groupreport" data-testid="tab-groupreport">Group Report</TabsTrigger>
-                <TabsTrigger value="override" data-testid="tab-override">Override</TabsTrigger>
-              </>
+              <TabsTrigger value="override" data-testid="tab-override" className="gap-1">
+                <Settings className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Override</span>
+              </TabsTrigger>
             )}
           </TabsList>
 
