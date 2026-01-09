@@ -30,6 +30,13 @@ export function DashboardHeader() {
     staleTime: 10000,
   });
 
+  // Fetch route override status
+  const { data: configData } = useQuery<{ config: Record<string, string> }>({
+    queryKey: ['/api/admin/config'],
+    staleTime: 30000,
+  });
+  const routeOverrideEnabled = configData?.config?.routes_override_allow_single === 'true';
+
   const handleLogout = () => {
     localStorage.removeItem('token');
     setLocation('/');
@@ -182,10 +189,13 @@ export function DashboardHeader() {
               </div>
             ) : (
               <div className="flex items-center gap-3">
-                <span className="text-xs md:text-sm font-semibold text-red-600">{t('status.routesClosed') || 'Routes Closed'} (8:00PM GMT-5)</span>
+                <span className={`text-xs md:text-sm font-semibold ${routeOverrideEnabled ? 'text-orange-600' : 'text-red-600'}`}>
+                  {t('status.routesClosed') || 'Routes Closed'} (8:00PM GMT-5)
+                  {routeOverrideEnabled && <span className="ml-1">- Route Override</span>}
+                </span>
                 <Dialog>
                   <DialogTrigger asChild>
-                    <Button variant="ghost" size="icon" className="text-red-600 h-6 w-6" aria-label="Routes Closed help">
+                    <Button variant="ghost" size="icon" className={`${routeOverrideEnabled ? 'text-orange-600' : 'text-red-600'} h-6 w-6`} aria-label="Routes Closed help">
                       <HelpCircle className="h-4 w-4" />
                     </Button>
                   </DialogTrigger>

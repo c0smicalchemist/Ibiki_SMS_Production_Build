@@ -14,6 +14,8 @@ const buttonVariants = cva(
           "bg-primary text-primary-foreground border border-primary-border",
         destructive:
           "bg-destructive text-destructive-foreground border border-destructive-border",
+        "outline-destructive":
+          "border border-red-300 text-red-600 hover:bg-red-50 hover:border-red-400 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950/30",
         outline:
           // Shows the background color of whatever card / sidebar / accent background it is inside of.
           // Inherits the current text color.

@@ -13,7 +13,7 @@ import { Users, UserPlus, Upload, Trash2, Edit, FolderPlus, Folder, ArrowLeft, D
 import { Link } from "wouter";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { ClientSelector } from "@/components/ClientSelector";
+import { AdminModeBar } from "@/components/AdminModeBar";
 import { DashboardHeader } from "@/components/DashboardHeader";
 import { useLanguage } from "@/contexts/LanguageContext";
 
@@ -409,31 +409,23 @@ export default function Contacts() {
     <div className="min-h-screen bg-background">
       <DashboardHeader />
       <div className="mx-[2cm] p-6 space-y-6">
-        <div className="flex items-center gap-3">
-          <Link href={isAdmin ? "/admin" : (profile?.user?.role === 'supervisor' ? "/adminsup" : "/dashboard")}>
-            <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
-              <ArrowLeft className="h-5 w-5" strokeWidth={3} />
-            </Button>
-          </Link>
-          <div>{/* Page title moved to header bar; keep minimal spacing */}</div>
-        </div>
-
-        {(isAdmin || profile?.user?.role === 'supervisor') && (
-          <Card>
-            <CardHeader>
-              <CardTitle>{profile?.user?.role === 'supervisor' ? t('sendSms.supervisorDirectMode') : t('contacts.adminMode')}</CardTitle>
-              <CardDescription>{t('contacts.selectClient')}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <ClientSelector 
-                selectedClientId={selectedClientId}
-                onClientChange={setSelectedClientId}
-                isAdminMode={isAdminMode}
-                onAdminModeChange={setIsAdminMode}
-                modeLabel={profile?.user?.role === 'supervisor' ? t('sendSms.supervisorDirectMode') : 'Admin Direct Mode'}
-              />
-            </CardContent>
-          </Card>
+        {(isAdmin || profile?.user?.role === 'supervisor') ? (
+          <AdminModeBar
+            selectedClientId={selectedClientId}
+            onClientChange={setSelectedClientId}
+            isAdminMode={isAdminMode}
+            onAdminModeChange={setIsAdminMode}
+            isSupervisor={profile?.user?.role === 'supervisor'}
+            backHref={isAdmin ? "/admin" : "/adminsup"}
+          />
+        ) : (
+          <div className="flex items-center gap-3">
+            <Link href="/dashboard">
+              <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
+                <ArrowLeft className="h-5 w-5" strokeWidth={3} />
+              </Button>
+            </Link>
+          </div>
         )}
 
         {syncStats.unsynced > 0 && (

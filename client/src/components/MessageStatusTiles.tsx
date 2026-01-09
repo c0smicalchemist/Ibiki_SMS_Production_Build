@@ -1,6 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useLanguage } from "@/contexts/LanguageContext";
+import { CheckCircle, Send, XCircle, MessageSquare, Inbox, Reply } from "lucide-react";
+
+// API Status definitions - Delivered, Sent, Replied, Failed
+const STATUS_CONFIG = {
+  delivered: { label: 'Delivered', description: 'Carrier has confirmed sending', icon: CheckCircle, color: 'text-green-600', bg: 'bg-green-50 dark:bg-green-950/30', border: 'border-green-200 dark:border-green-800', chartColor: '#10b981' },
+  sent: { label: 'Sent', description: 'Sent to carrier, receipt unavailable', icon: Send, color: 'text-blue-600', bg: 'bg-blue-50 dark:bg-blue-950/30', border: 'border-blue-200 dark:border-blue-800', chartColor: '#3b82f6' },
+  replied: { label: 'Replied', description: 'Unique client first replies', icon: Reply, color: 'text-purple-600', bg: 'bg-purple-50 dark:bg-purple-950/30', border: 'border-purple-200 dark:border-purple-800', chartColor: '#8b5cf6' },
+  failed: { label: 'Failed', description: 'Not received', icon: XCircle, color: 'text-red-600', bg: 'bg-red-50 dark:bg-red-950/30', border: 'border-red-200 dark:border-red-800', chartColor: '#ef4444' },
+};
 
 export default function MessageStatusTiles({ userId }: { userId?: string }) {
   const { t } = useLanguage();
@@ -32,19 +41,21 @@ export default function MessageStatusTiles({ userId }: { userId?: string }) {
 
   const logs = (logsData?.messages || []).map((m: any) => ({
     createdAt: new Date(m?.createdAt || m?.timestamp || Date.now()).getTime(),
-    status: String(m?.status || '').toLowerCase(),
+    status: String(m?.status || 'sent').toLowerCase(),
     messageCount: Number(m?.messageCount ?? 1),
-    recipientsLen: Array.isArray(m?.recipients) ? (m?.recipients as any[]).length : (m?.recipient ? 1 : 0)
+    recipientsLen: Array.isArray(m?.recipients) ? (m?.recipients as any[]).length : (m?.recipient ? 1 : 0),
+    recipient: m?.recipient || (Array.isArray(m?.recipients) ? m?.recipients[0] : null),
   }));
-  const incoming = ((inboxData as any)?.messages || []).map((i: any) => ({
+  
+  const inboxMessages = ((inboxData as any)?.messages || []).map((i: any) => ({
     timestamp: new Date(i?.timestamp || i?.createdAt || Date.now()).getTime(),
+    from: i?.from || '',
   }));
 
   const startOfToday = (() => {
     const d = new Date(); d.setHours(0,0,0,0); return d.getTime();
   })();
 
-  const chargeable = (s: string) => s === 'sent' || s === 'delivered' || s === 'queued';
   const countFor = (l: any) => {
     const mc = Number(l.messageCount);
     if (Number.isFinite(mc) && mc > 0) return mc;
@@ -52,67 +63,153 @@ export default function MessageStatusTiles({ userId }: { userId?: string }) {
     return (Number.isFinite(rl) && rl > 0) ? rl : 1;
   };
 
-  const totalSent = logs.filter(l => chargeable(l.status)).reduce((acc, l) => acc + countFor(l), 0);
-  const totalReceived = incoming.length;
-  const totalCombined = totalSent + totalReceived;
-  const totalReceivedPct = totalCombined ? Math.round((totalReceived / totalCombined) * 100) : 0;
+  // Normalize status for grouping (no more unknown/queued - map to sent)
+  const normalizeStatus = (s: string): 'delivered' | 'sent' | 'failed' => {
+    const lower = s.toLowerCase();
+    if (lower === 'delivered') return 'delivered';
+    if (lower === 'failed' || lower === 'error') return 'failed';
+    return 'sent'; // queued, sending, pending, unknown all count as sent
+  };
 
-  const sentToday = logs.filter(l => l.createdAt >= startOfToday && chargeable(l.status)).reduce((acc, l) => acc + countFor(l), 0);
-  const receivedToday = incoming.filter(i => i.timestamp >= startOfToday).length;
-  const todayCombined = sentToday + receivedToday;
-  const todayReceivedPct = todayCombined ? Math.round((receivedToday / todayCombined) * 100) : 0;
+  // Calculate unique replied count - unique phone numbers that have replied
+  // A "reply" is the first time a unique phone number sends a message back
+  const getUniqueRepliedCount = (messages: typeof inboxMessages, sinceTimestamp?: number) => {
+    const filtered = sinceTimestamp ? messages.filter(m => m.timestamp >= sinceTimestamp) : messages;
+    const uniquePhones = new Set(filtered.map(m => m.from.replace(/\D/g, '')));
+    return uniquePhones.size;
+  };
+
+  // Calculate status breakdown for all time
+  const statusBreakdown = logs.reduce((acc, l) => {
+    const status = normalizeStatus(l.status);
+    acc[status] = (acc[status] || 0) + countFor(l);
+    return acc;
+  }, {} as Record<string, number>);
+
+  // Add replied count (unique first-time client replies)
+  statusBreakdown.replied = getUniqueRepliedCount(inboxMessages);
+
+  // Calculate status breakdown for today
+  const todayLogs = logs.filter(l => l.createdAt >= startOfToday);
+  const todayStatusBreakdown = todayLogs.reduce((acc, l) => {
+    const status = normalizeStatus(l.status);
+    acc[status] = (acc[status] || 0) + countFor(l);
+    return acc;
+  }, {} as Record<string, number>);
+
+  // Add today's replied count
+  todayStatusBreakdown.replied = getUniqueRepliedCount(inboxMessages, startOfToday);
+
+  // Totals
+  const totalOutbound = (statusBreakdown.delivered || 0) + (statusBreakdown.sent || 0) + (statusBreakdown.failed || 0);
+  const totalReplied = statusBreakdown.replied || 0;
+  const todayOutbound = (todayStatusBreakdown.delivered || 0) + (todayStatusBreakdown.sent || 0) + (todayStatusBreakdown.failed || 0);
+  const todayReplied = todayStatusBreakdown.replied || 0;
+
+  // Status bar - shows proportion of outbound statuses
+  const StatusBar = ({ breakdown }: { breakdown: Record<string, number> }) => {
+    const total = (breakdown.delivered || 0) + (breakdown.sent || 0) + (breakdown.failed || 0);
+    if (total === 0) return <div className="h-2 rounded-full bg-gray-200 dark:bg-gray-700" />;
+    return (
+      <div className="h-2 rounded-full overflow-hidden flex bg-gray-200 dark:bg-gray-700">
+        {(['delivered', 'sent', 'failed'] as const).map(status => {
+          const count = breakdown[status] || 0;
+          if (count === 0) return null;
+          const pct = (count / total) * 100;
+          const colors = {
+            delivered: 'bg-green-500',
+            sent: 'bg-blue-500',
+            failed: 'bg-red-500',
+          };
+          return <div key={status} className={`${colors[status]}`} style={{ width: `${pct}%` }} />;
+        })}
+      </div>
+    );
+  };
+
+  // Status breakdown grid - 4 columns: Delivered, Sent, Replied, Failed
+  const StatusBreakdownList = ({ breakdown }: { breakdown: Record<string, number> }) => (
+    <div className="grid grid-cols-4 gap-2 mt-3">
+      {(['delivered', 'sent', 'replied', 'failed'] as const).map(status => {
+        const config = STATUS_CONFIG[status];
+        const Icon = config.icon;
+        const count = breakdown[status] || 0;
+        return (
+          <div key={status} className={`flex flex-col items-center p-2.5 rounded-lg ${config.bg} border ${config.border}`}>
+            <Icon className={`h-5 w-5 ${config.color}`} />
+            <span className="text-lg font-bold mt-1">{count.toLocaleString()}</span>
+            <span className="text-[10px] text-muted-foreground text-center leading-tight font-medium">{config.label}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {/* All Time Card */}
       <Card>
-        <CardHeader>
-          <CardTitle className="text-base font-medium">{t('messageStatus.allTime') || 'All Time'}</CardTitle>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base font-medium flex items-center gap-2">
+            <MessageSquare className="h-4 w-4 text-blue-600" />
+            Message Status - All Time
+          </CardTitle>
         </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            <div className="p-3 rounded border bg-muted/50">
-              <div className="text-muted-foreground">{t('messageStatus.totalSent') || 'Total Sent'}</div>
-              <div className="text-2xl font-bold">{totalSent.toLocaleString()}</div>
+        <CardContent className="space-y-3">
+          {/* Summary row */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="p-3 rounded-lg border bg-muted/30">
+              <div className="text-xs text-muted-foreground flex items-center gap-1.5">
+                <Send className="h-3 w-3" /> Total Outbound
+              </div>
+              <div className="text-2xl font-bold">{totalOutbound.toLocaleString()}</div>
             </div>
-            <div className="p-3 rounded border bg-muted/50">
-              <div className="text-muted-foreground">{t('messageStatus.totalReceived') || 'Total Received'}</div>
-              <div className="text-2xl font-bold">{totalReceived.toLocaleString()}</div>
-            </div>
-            <div className="p-3 rounded border bg-muted/50">
-              <div className="text-muted-foreground">{t('messageStatus.totalReceivedPct') || 'Total Received %'}</div>
-              <div className="text-2xl font-bold">{totalReceivedPct}%</div>
-            </div>
-            <div className="p-3 rounded border bg-muted/50">
-              <div className="text-muted-foreground">{t('messageStatus.totalCombined') || 'Total'}</div>
-              <div className="text-2xl font-bold">{totalCombined.toLocaleString()}</div>
+            <div className="p-3 rounded-lg border bg-purple-50 dark:bg-purple-950/30">
+              <div className="text-xs text-purple-600 flex items-center gap-1.5">
+                <Reply className="h-3 w-3" /> Unique Replies
+              </div>
+              <div className="text-2xl font-bold text-purple-700 dark:text-purple-400">{totalReplied.toLocaleString()}</div>
             </div>
           </div>
+          
+          {/* Status bar */}
+          <StatusBar breakdown={statusBreakdown} />
+          
+          {/* Status breakdown */}
+          <StatusBreakdownList breakdown={statusBreakdown} />
         </CardContent>
       </Card>
 
+      {/* Today Card */}
       <Card>
-        <CardHeader>
-          <CardTitle className="text-base font-medium">{t('messageStatus.today') || 'Today'}</CardTitle>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base font-medium flex items-center gap-2">
+            <MessageSquare className="h-4 w-4 text-blue-600" />
+            Message Status - Today
+          </CardTitle>
         </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            <div className="p-3 rounded border bg-muted/50">
-              <div className="text-muted-foreground">{t('messageStatus.sentToday') || 'Sent Today'}</div>
-              <div className="text-2xl font-bold">{sentToday.toLocaleString()}</div>
+        <CardContent className="space-y-3">
+          {/* Summary row */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="p-3 rounded-lg border bg-muted/30">
+              <div className="text-xs text-muted-foreground flex items-center gap-1.5">
+                <Send className="h-3 w-3" /> Total Outbound
+              </div>
+              <div className="text-2xl font-bold">{todayOutbound.toLocaleString()}</div>
             </div>
-            <div className="p-3 rounded border bg-muted/50">
-              <div className="text-muted-foreground">{t('messageStatus.receivedToday') || 'Received Today'}</div>
-              <div className="text-2xl font-bold">{receivedToday.toLocaleString()}</div>
-            </div>
-            <div className="p-3 rounded border bg-muted/50">
-              <div className="text-muted-foreground">{t('messageStatus.todayReceivedPct') || 'Today Received %'}</div>
-              <div className="text-2xl font-bold">{todayReceivedPct}%</div>
-            </div>
-            <div className="p-3 rounded border bg-muted/50">
-              <div className="text-muted-foreground">{t('messageStatus.totalToday') || 'Total Today'}</div>
-              <div className="text-2xl font-bold">{todayCombined.toLocaleString()}</div>
+            <div className="p-3 rounded-lg border bg-purple-50 dark:bg-purple-950/30">
+              <div className="text-xs text-purple-600 flex items-center gap-1.5">
+                <Reply className="h-3 w-3" /> Unique Replies
+              </div>
+              <div className="text-2xl font-bold text-purple-700 dark:text-purple-400">{todayReplied.toLocaleString()}</div>
             </div>
           </div>
+          
+          {/* Status bar */}
+          <StatusBar breakdown={todayStatusBreakdown} />
+          
+          {/* Status breakdown */}
+          <StatusBreakdownList breakdown={todayStatusBreakdown} />
         </CardContent>
       </Card>
     </div>

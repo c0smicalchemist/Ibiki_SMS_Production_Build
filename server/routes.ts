@@ -23,6 +23,8 @@ function looksLikePhone(val: any): boolean {
 import { VendorService } from "./vendor-service";
 import { VendorManager } from "./vendor-manager";
 import vendorRoutes from "./routes/vendor-routes";
+import queueRoutes from "./routes/queue-routes";
+import { startSMSWorker } from "./sms-worker";
 import { SMSMessage } from "../shared/vendor-config";
 import { env } from "./env";
 import { authLimiter, apiLimiter, webhookLimiter, generalLimiter } from "./middleware/rateLimitMiddleware";
@@ -74,6 +76,49 @@ function isAfterClosedEst(d: Date) {
 }
 function closedMessage() {
   return { error: 'Routes Closed', details: 'Open after 09:00 GMT-8 and closed after 20:00 GMT-5. Admin/Supervisor may enable single-SMS override.' };
+}
+
+// Compliance helper: Apply sender name and opt-out text to messages
+async function applyComplianceToMessage(userId: string, recipientPhone: string, originalMessage: string): Promise<string> {
+  try {
+    // Get compliance settings from config
+    const senderNameCfg = await storage.getSystemConfig('compliance_sender_name');
+    const optOutEnabledCfg = await storage.getSystemConfig('compliance_optout_enabled');
+    const optOutTextCfg = await storage.getSystemConfig('compliance_optout_text');
+    const firstOnlyCfg = await storage.getSystemConfig('compliance_first_only');
+
+    const senderName = senderNameCfg?.value || '';
+    const optOutEnabled = optOutEnabledCfg?.value === 'true';
+    const optOutText = optOutTextCfg?.value || 'Reply STOP to unsubscribe';
+    const firstOnly = firstOnlyCfg?.value !== 'false'; // Default to true
+
+    let message = originalMessage;
+
+    // Add sender name prefix if configured
+    if (senderName && senderName.trim()) {
+      message = `[${senderName.trim()}] ${message}`;
+    }
+
+    // Add opt-out text if enabled
+    if (optOutEnabled) {
+      // Check if we should only add on first message
+      if (firstOnly) {
+        // Check if we've ever sent to this recipient before
+        const hasSentBefore = await storage.hasEverSentToRecipient(userId, recipientPhone);
+        if (!hasSentBefore) {
+          message = `${message} ${optOutText}`;
+        }
+      } else {
+        // Always add opt-out text
+        message = `${message} ${optOutText}`;
+      }
+    }
+
+    return message;
+  } catch (error) {
+    console.error('Error applying compliance settings:', error);
+    return originalMessage; // On error, return original message
+  }
 }
 
 // Middleware to verify JWT token
@@ -435,6 +480,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Mount vendor routes
   app.use(vendorRoutes);
+
+  // Mount queue management routes
+  app.use('/api/admin/queue', queueRoutes);
+
+  // Start SMS Queue Worker (for async processing)
+  try {
+    if (process.env.ENABLE_SMS_QUEUE !== 'false') {
+      await startSMSWorker();
+      console.log('✅ SMS Queue Worker started');
+    } else {
+      console.log('⚠️ SMS Queue Worker disabled (ENABLE_SMS_QUEUE=false)');
+    }
+  } catch (error) {
+    console.error('⚠️ SMS Queue Worker failed to start (Redis may be unavailable):', error);
+  }
 
   /**
    * Health Check Endpoints
@@ -4079,11 +4139,62 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
   });
 
   // TextBelt webhook endpoint (POST)
+  // TextBelt sends: { textId, fromNumber, text, data? }
+  // Headers: X-textbelt-signature (HMAC SHA256), X-textbelt-timestamp
   app.post('/api/webhook/textbelt', async (req, res) => {
     try {
       const p = req.body || {};
-      const from = normalizePhone(String(p.from || p.sender || p.msisdn), '+1');
-      let receiver = normalizePhone(String(p.to || p.receiver || p.recipient), '+1');
+      
+      // TextBelt reply format: { textId, fromNumber, text, data? }
+      // Also support legacy format for backwards compatibility
+      const textBeltFormat = !!(p.textId && p.fromNumber);
+      
+      let from: string;
+      let message: string;
+      let messageId: string;
+      let receiver: string = '';
+      let business: string | null = null;
+      let originalSenderId: string | undefined = undefined; // userId of the client who sent the original SMS
+      
+      if (textBeltFormat) {
+        // Official TextBelt reply webhook format
+        from = normalizePhone(String(p.fromNumber), '+1');
+        message = p.text || '';
+        messageId = String(p.textId);
+        
+        // Try to find original message to get the sender (client) info
+        const originalMessage = await storage.getMessageLogByMessageId(messageId);
+        if (originalMessage) {
+          // The original message's userId is the client who sent it - route reply to them
+          originalSenderId = originalMessage.userId;
+          receiver = originalMessage.sender || '';
+          console.log('[TextBelt Webhook] Found original message, routing to userId:', originalSenderId);
+        }
+        
+        // Parse custom data if present (we can store userId or business in webhookData)
+        if (p.data) {
+          try {
+            const customData = typeof p.data === 'string' ? JSON.parse(p.data) : p.data;
+            if (customData.userId) {
+              // Direct routing from webhookData takes priority
+              originalSenderId = customData.userId;
+            }
+            if (customData.business) {
+              business = customData.business;
+            }
+          } catch {}
+        }
+        
+        console.log('[TextBelt Webhook] Received reply:', { textId: p.textId, fromNumber: p.fromNumber, text: message?.substring(0, 50) });
+      } else {
+        // Legacy format fallback
+        from = normalizePhone(String(p.from || p.sender || p.msisdn), '+1');
+        receiver = normalizePhone(String(p.to || p.receiver || p.recipient), '+1');
+        message = p.message || p.text || '';
+        messageId = p.messageId || p.id || `tb-${Date.now()}`;
+        const looksLikePhone = (v: any) => typeof v === 'string' && /\+?\d{6,}/.test(v);
+        business = p.business || (!looksLikePhone(p.to) ? p.to : null) || (!looksLikePhone(p.receiver) ? p.receiver : null) || null;
+      }
       
       // Check for receiver aliases
       try {
@@ -4096,41 +4207,49 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
         }
       } catch {}
       
-      const message = p.message || p.text || '';
-      const messageId = p.messageId || p.id || `tb-${Date.now()}`;
-      const tsRaw = p.timestamp || p.time || Date.now();
-      const timestamp = new Date(typeof tsRaw === 'string' ? tsRaw : Number(tsRaw));
+      const timestamp = new Date();
       const looksLikePhone = (v: any) => typeof v === 'string' && /\+?\d{6,}/.test(v);
-      const business = p.business || (!looksLikePhone(p.to) ? p.to : null) || (!looksLikePhone(p.receiver) ? p.receiver : null) || null;
 
-      if (!from || !receiver || !message) {
+      if (!from || !message) {
         return res.status(400).json({ success: false, error: 'Invalid webhook payload' });
       }
 
       // Route to appropriate user
       let userId: string | undefined = undefined;
       
-      // Try business name routing first
-      if (business && String(business).trim() !== '') {
+      // PRIORITY 1: Use the original sender's userId (from the outbound message log)
+      // This is the most reliable method - the reply goes to whoever sent the original SMS
+      if (originalSenderId) {
+        userId = originalSenderId;
+        console.log('[TextBelt Webhook] Routing by original message sender:', userId);
+      }
+      
+      // PRIORITY 2: Try business name routing
+      if (!userId && business && String(business).trim() !== '') {
         const profileByBiz = await storage.getClientProfileByBusinessName(String(business));
         userId = profileByBiz?.userId;
+        if (userId) console.log('[TextBelt Webhook] Routing by business name:', business);
       }
       
-      // Try phone number routing
+      // PRIORITY 3: Try phone number routing (find client who has this phone in their contacts)
       if (!userId) {
         userId = await storage.findClientByRecipient(from);
+        if (userId) console.log('[TextBelt Webhook] Routing by contact phone match:', from);
       }
       
+      // PRIORITY 4: Try receiver phone number profile match
       if (!userId && looksLikePhone(receiver)) {
         const profile = await storage.getClientProfileByPhoneNumber(receiver);
         userId = profile?.userId;
+        if (userId) console.log('[TextBelt Webhook] Routing by receiver profile:', receiver);
       }
       
-      // Fallback to admin
+      // FALLBACK: Route to admin
       if (!userId) {
         const fallbackBiz = await getAdminDefaultBusinessId();
         const fallbackProfile = await storage.getClientProfileByBusinessName(fallbackBiz);
         userId = fallbackProfile?.userId;
+        console.log('[TextBelt Webhook] Fallback routing to admin');
       }
 
       // Create incoming message record
@@ -5021,35 +5140,41 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
         });
       }
 
-      const extremeApiKey = await getExtremeApiKey();
       const normalizedRecipient = normalizePhone(String(recipient), String(defaultDial || '+1'));
       if (!normalizedRecipient) return res.status(400).json({ success: false, error: "Invalid recipient phone number", code: "INVALID_RECIPIENT" });
       
-      // Forward request to ExtremeSMS
-      const response = await axios.post(
-        `${EXTREMESMS_BASE_URL}/api/v2/sms/sendsingle`,
-        { recipient: normalizedRecipient, message },
-        {
-          headers: {
-            "Authorization": `Bearer ${extremeApiKey}`,
-            "Content-Type": "application/json"
-          }
-        }
-      );
+      // Apply compliance settings (sender name and opt-out text)
+      const compliantMessage = await applyComplianceToMessage(req.user.userId, normalizedRecipient, message);
+
+      const smsMessage: SMSMessage = {
+        recipient: normalizedRecipient,
+        message: compliantMessage
+      };
+
+      // Use vendor service so active vendor (e.g., TextBelt) is respected
+      const result = await vendorService.sendSMS(smsMessage);
+      const responsePayload = {
+        success: !!result.success,
+        messageId: result.messageId,
+        status: result.success ? 'sent' : 'failed',
+        vendor: result.vendor,
+        vendorMessageId: result.vendorMessageId,
+        error: result.error
+      };
 
       // Deduct credits and log
       await deductCreditsAndLog(
         req.user.userId,
         1,
         "/api/v2/sms/sendsingle",
-        response.data.messageId,
-        response.data.status,
+        String(result.messageId || `single_${Date.now()}`),
+        result.success ? 'sent' : 'failed',
         { recipient, normalizedRecipient, message },
-        response.data,
+        responsePayload,
         normalizedRecipient
       );
 
-      res.json(response.data);
+      res.json(responsePayload);
     } catch (error: any) {
       if (error.message === "Insufficient credits") {
         return res.status(402).json({ 
@@ -5096,12 +5221,14 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
 
       const extremeApiKey = await getExtremeApiKey();
       
-      // Use vendor service for bulk SMS
+      // Use vendor service for bulk SMS with compliance
       const results = [];
       for (const recipient of normalizedRecipients) {
+        // Apply compliance settings per recipient (opt-out only on first message to each)
+        const compliantMessage = await applyComplianceToMessage(req.user.userId, recipient, content);
         const smsMessage: SMSMessage = {
           recipient,
-          message: content
+          message: compliantMessage
         };
         const result = await vendorService.sendSMS(smsMessage);
         results.push(result);
@@ -5170,12 +5297,14 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
       const transformed = messages.map((m: any) => ({ recipient: normalizePhone(String(m.recipient || m.to), '+1'), message: m.message, content: m.message })).filter((m: any) => !!m.recipient);
       if (transformed.length === 0) return res.status(400).json({ success: false, error: "No valid messages after normalization", code: "INVALID_MESSAGES" });
       
-      // Use vendor service for multi SMS
+      // Use vendor service for multi SMS with compliance
       const results = [];
       for (const message of transformed) {
+        // Apply compliance settings per recipient
+        const compliantMessage = await applyComplianceToMessage(req.user.userId, message.recipient, message.message);
         const smsMessage: SMSMessage = {
           recipient: message.recipient,
-          message: message.message
+          message: compliantMessage
         };
         const result = await vendorService.sendSMS(smsMessage);
         results.push(result);
@@ -5333,22 +5462,29 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
         });
       }
       
-      const extremeApiKey = await getExtremeApiKey();
-      
-      const response = await axios.get(
-        `${EXTREMESMS_BASE_URL}/api/v2/sms/status/${messageId}`,
-        {
-          headers: {
-            "Authorization": `Bearer ${extremeApiKey}`
-          }
-        }
-      );
+      // Route status checks based on the original vendor
+      const vendorId = (messageLog as any)?.vendor || 'extremesms';
+      const vendor = (() => {
+        try { return vendorService.getAvailableVendors().find(v => v.id === vendorId); } catch { return undefined; }
+      })();
 
-      // Update our database with the latest status
+      if (vendor?.type === 'textbelt') {
+        const status = await vendorService.getDeliveryStatus(vendor, String(messageId));
+        if (status.status && status.status !== messageLog.status) {
+          await storage.updateMessageStatus(messageLog.id, status.status);
+        }
+        return res.json({ success: true, messageId, status: status.status, delivered: status.delivered, error: status.error });
+      }
+
+      // Default: ExtremeSMS
+      const extremeApiKey = await getExtremeApiKey();
+      const response = await axios.get(`${EXTREMESMS_BASE_URL}/api/v2/sms/status/${messageId}`, {
+        headers: { "Authorization": `Bearer ${extremeApiKey}` }
+      });
+
       if (response.data.status && response.data.status !== messageLog.status) {
         await storage.updateMessageStatus(messageLog.id, response.data.status);
       }
-
       res.json(response.data);
     } catch (error: any) {
       if (error.response) {
@@ -5900,24 +6036,31 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
         targetUserId = userId;
       }
 
-      const extremeApiKey = await getExtremeApiKey();
-
       const normalizedTo = normalizePhone(String(to), String(defaultDial || '+1'));
       if (!normalizedTo) return res.status(400).json({ error: "Invalid recipient number" });
-      const response = await axios.post(
-        `${EXTREMESMS_BASE_URL}/api/v2/sms/sendsingle`,
-        { recipient: normalizedTo, message },
-        {
-          headers: {
-            "Authorization": `Bearer ${extremeApiKey}`,
-            "Content-Type": "application/json"
-          }
-        }
-      );
+      
+      // Apply compliance settings (sender name and opt-out text)
+      const compliantMessage = await applyComplianceToMessage(targetUserId, normalizedTo, message);
+      
+      // Use vendor service so active vendor (e.g., TextBelt) is respected
+      const smsMessage: SMSMessage = {
+        recipient: normalizedTo,
+        message: compliantMessage
+      };
+      const result = await vendorService.sendSMS(smsMessage);
+      
+      const responsePayload = {
+        success: !!result.success,
+        messageId: result.messageId,
+        status: result.success ? 'sent' : 'failed',
+        vendor: result.vendor,
+        vendorMessageId: result.vendorMessageId,
+        error: result.error
+      };
         
       // Admin direct mode: audit-only (no charge)
       if (isAdmin && adminDirect === true) {
-        await createAdminAuditLog(req.user.userId, 'web-ui-single', response.data.messageId || 'unknown', 'sent', { to, message, normalizedTo }, response.data, normalizedTo);
+        await createAdminAuditLog(req.user.userId, 'web-ui-single', result.messageId || 'unknown', 'sent', { to, message, normalizedTo }, responsePayload, normalizedTo);
       } else {
         // Supervisor direct mode should deduct from supervisor's own account
         if (isSupervisor && supervisorDirect === true) {
@@ -5927,18 +6070,18 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
           targetUserId,
           1,
           'web-ui-single',
-          response.data.messageId || 'unknown',
-          'sent',
+          result.messageId || 'unknown',
+          result.success ? 'sent' : 'failed',
           { to, message, normalizedTo },
-          response.data,
+          responsePayload,
           normalizedTo
         );
         if ((isAdmin || isSupervisor) && req.user.userId !== targetUserId) {
-          await createAdminAuditLog(req.user.userId, 'web-ui-single', response.data.messageId || 'unknown', 'sent', { to, message, normalizedTo }, response.data, normalizedTo);
+          await createAdminAuditLog(req.user.userId, 'web-ui-single', result.messageId || 'unknown', 'sent', { to, message, normalizedTo }, responsePayload, normalizedTo);
         }
       }
 
-      res.json({ success: true, messageId: response.data.messageId, data: response.data });
+      res.json({ success: true, messageId: result.messageId, vendor: result.vendor, data: responsePayload });
     } catch (error: any) {
       if (error?.response?.status === 401) {
         return res.status(401).json({ error: 'Unauthorized: Provider rejected API key' });
@@ -6003,37 +6146,48 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
         targetUserId = userId;
       }
 
-      const extremeApiKey = await getExtremeApiKey();
       const { ok: normalizedRecipients, invalid } = normalizeMany(recipients, String(defaultDial || '+1'));
       if (normalizedRecipients.length === 0) return res.status(400).json({ error: "No valid recipients after normalization", invalid });
-      const response = await axios.post(
-        `${EXTREMESMS_BASE_URL}/api/v2/sms/sendbulk`,
-        { recipients: normalizedRecipients, message, content: message },
-        { headers: { Authorization: `Bearer ${extremeApiKey}`, "Content-Type": "application/json" } }
-      );
+      
+      // For bulk with same message, apply compliance for each recipient individually
+      // Use vendor service so active vendor (e.g., TextBelt) is respected
+      const results = [];
+      for (const recipient of normalizedRecipients) {
+        const compliantMessage = await applyComplianceToMessage(targetUserId, recipient, message);
+        try {
+          const smsMessage: SMSMessage = { recipient, message: compliantMessage };
+          const result = await vendorService.sendSMS(smsMessage);
+          results.push({ recipient, success: result.success, messageId: result.messageId, vendor: result.vendor, data: result });
+        } catch (e: any) {
+          results.push({ recipient, success: false, error: e?.message || String(e) });
+        }
+      }
+      const successful = results.filter(r => r.success);
+      const failed = results.filter(r => !r.success);
+      const responsePayload = { messageId: successful[0]?.messageId || 'bulk_' + Date.now(), results, successful: successful.length, failed: failed.length, vendor: successful[0]?.vendor };
 
       if (isAdmin && adminDirect === true) {
-        await createAdminAuditLog(req.user.userId, 'web-ui-bulk', response.data.messageId || 'unknown', 'sent', { recipients, normalizedRecipients, invalid, message }, response.data, undefined, normalizedRecipients);
+        await createAdminAuditLog(req.user.userId, 'web-ui-bulk', responsePayload.messageId || 'unknown', 'sent', { recipients, normalizedRecipients, invalid, message }, responsePayload, undefined, normalizedRecipients);
       } else {
         if (isSupervisor && supervisorDirect === true) {
           targetUserId = req.user.userId;
         }
         const { messageLog } = await deductCreditsAndLog(
           targetUserId,
-          normalizedRecipients.length,
+          successful.length,
           'web-ui-bulk',
-          response.data.messageId || 'unknown',
-          'sent',
+          responsePayload.messageId || 'unknown',
+          successful.length > 0 ? 'sent' : 'failed',
           { recipients, normalizedRecipients, invalid, message },
-          response.data,
+          responsePayload,
           undefined,
           normalizedRecipients
         );
         if ((isAdmin || isSupervisor) && req.user.userId !== targetUserId) {
-          await createAdminAuditLog(req.user.userId, 'web-ui-bulk', response.data.messageId || 'unknown', 'sent', { recipients, normalizedRecipients, invalid, message }, response.data, undefined, normalizedRecipients);
+          await createAdminAuditLog(req.user.userId, 'web-ui-bulk', responsePayload.messageId || 'unknown', 'sent', { recipients, normalizedRecipients, invalid, message }, responsePayload, undefined, normalizedRecipients);
         }
       }
-      res.json({ success: true, messageId: response.data.messageId, data: response.data });
+      res.json({ success: true, messageId: responsePayload.messageId, vendor: responsePayload.vendor, data: responsePayload });
     } catch (error: any) {
       if (error?.response?.status === 401) {
         return res.status(401).json({ error: 'Unauthorized: Provider rejected API key' });
@@ -6100,36 +6254,47 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
         targetUserId = userId;
       }
 
-      const extremeApiKey = await getExtremeApiKey();
       const transformed = messages.map((m: any) => ({ recipient: normalizePhone(String(m.to), String(defaultDial || '+1')), message: m.message, content: m.message }))
         .filter((m: any) => !!m.recipient);
       if (transformed.length === 0) return res.status(400).json({ error: "No valid messages after normalization" });
-      const response = await axios.post(
-        `${EXTREMESMS_BASE_URL}/api/v2/sms/sendbulkmulti`,
-        transformed,
-        { headers: { Authorization: `Bearer ${extremeApiKey}`, "Content-Type": "application/json" } }
-      );
+      
+      // Apply compliance per recipient (different messages)
+      // Use vendor service so active vendor (e.g., TextBelt) is respected
+      const results = [];
+      for (const msg of transformed) {
+        const compliantMessage = await applyComplianceToMessage(targetUserId, msg.recipient, msg.message);
+        try {
+          const smsMessage: SMSMessage = { recipient: msg.recipient, message: compliantMessage };
+          const result = await vendorService.sendSMS(smsMessage);
+          results.push({ recipient: msg.recipient, success: result.success, messageId: result.messageId, vendor: result.vendor, data: result });
+        } catch (e: any) {
+          results.push({ recipient: msg.recipient, success: false, error: e?.message || String(e) });
+        }
+      }
+      const successful = results.filter(r => r.success);
+      const failed = results.filter(r => !r.success);
+      const responsePayload = { messageId: successful[0]?.messageId || 'multi_' + Date.now(), results, successful: successful.length, failed: failed.length, vendor: successful[0]?.vendor };
 
       if (isAdmin && adminDirect === true) {
-        await createAdminAuditLog(req.user.userId, 'web-ui-bulk-multi', response.data.messageId || 'unknown', 'sent', { messages }, response.data);
+        await createAdminAuditLog(req.user.userId, 'web-ui-bulk-multi', responsePayload.messageId || 'unknown', 'sent', { messages }, responsePayload);
       } else {
         if (isSupervisor && supervisorDirect === true) {
           targetUserId = req.user.userId;
         }
         const { messageLog } = await deductCreditsAndLog(
           targetUserId,
-          transformed.length,
+          successful.length,
           'web-ui-bulk-multi',
-          response.data.messageId || 'unknown',
-          'sent',
+          responsePayload.messageId || 'unknown',
+          successful.length > 0 ? 'sent' : 'failed',
           { messages, transformed },
-          response.data
+          responsePayload
         );
         if ((isAdmin || isSupervisor) && req.user.userId !== targetUserId) {
-          await createAdminAuditLog(req.user.userId, 'web-ui-bulk-multi', response.data.messageId || 'unknown', 'sent', { messages }, response.data);
+          await createAdminAuditLog(req.user.userId, 'web-ui-bulk-multi', responsePayload.messageId || 'unknown', 'sent', { messages }, responsePayload);
         }
       }
-      res.json({ success: true, messageId: response.data.messageId, data: response.data });
+      res.json({ success: true, messageId: responsePayload.messageId, vendor: responsePayload.vendor, data: responsePayload });
     } catch (error: any) {
       if (error?.response?.status === 401) {
         return res.status(401).json({ error: 'Unauthorized: Provider rejected API key' });

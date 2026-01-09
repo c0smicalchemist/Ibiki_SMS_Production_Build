@@ -13,7 +13,7 @@ import { Send, Users, List, ArrowLeft, Upload } from "lucide-react";
 import { Trash2, RefreshCw } from "lucide-react";
 import { Link } from "wouter";
 import { Badge } from "@/components/ui/badge";
-import { ClientSelector } from "@/components/ClientSelector";
+import { AdminModeBar } from "@/components/AdminModeBar";
 import { DashboardHeader } from "@/components/DashboardHeader";
 import { useLanguage } from "@/contexts/LanguageContext";
 
@@ -92,6 +92,7 @@ export default function SendSMS() {
   const [replacing, setReplacing] = useState<Record<string, boolean>>({});
   const paraphraseControllerRef = useRef<AbortController | null>(null);
   const replaceControllersRef = useRef<Record<string, AbortController>>({});
+  const sendingLockRef = useRef<boolean>(false);
 
   const generateVariants = async (base: string) => {
     if (!base || base.trim().length === 0) return;
@@ -227,14 +228,48 @@ export default function SendSMS() {
         body: JSON.stringify(data)
       });
     },
-    onSuccess: () => {
+    onSuccess: (response) => {
+      sendingLockRef.current = false;
+      
+      // Check if vendor returned an error (e.g., proxy failure)
+      if (response?.data?.error) {
+        const errorMsg = response.data.error;
+        // Check for proxy-related errors
+        if (errorMsg.includes('North America') || errorMsg.includes('proxy') || errorMsg.includes('region')) {
+          toast({ 
+            title: "SMS Failed - Proxy Issue", 
+            description: `${errorMsg}. Check proxy settings in Admin > Proxies.`,
+            variant: "destructive" 
+          });
+        } else {
+          toast({ 
+            title: "SMS Failed", 
+            description: errorMsg,
+            variant: "destructive" 
+          });
+        }
+        return;
+      }
+      
       toast({ title: t('common.success'), description: t('sendSms.success.sent') });
       setSingleTo("");
       setSingleMessage("");
       queryClient.invalidateQueries({ queryKey: ['/api/client/messages'] });
     },
     onError: (error: any) => {
-      toast({ title: t('common.error'), description: error.message || t('sendSms.error.failed'), variant: "destructive" });
+      sendingLockRef.current = false;
+      
+      // Check for proxy-related errors in error message
+      const errorMsg = error.message || t('sendSms.error.failed');
+      if (errorMsg.includes('North America') || errorMsg.includes('proxy') || errorMsg.includes('region')) {
+        toast({ 
+          title: "SMS Failed - Proxy Issue", 
+          description: `${errorMsg}. Check proxy settings in Admin > Proxies.`,
+          variant: "destructive" 
+        });
+      } else {
+        toast({ title: t('common.error'), description: errorMsg, variant: "destructive" });
+      }
     }
   });
 
@@ -277,7 +312,15 @@ export default function SendSMS() {
   });
 
   const handleSendSingle = () => {
+    // Prevent double-click sends
+    if (sendingLockRef.current || sendSingleMutation.isPending) {
+      console.log('[SendSMS] Blocked duplicate send attempt');
+      return;
+    }
+    sendingLockRef.current = true;
+    
     if (!singleTo || !singleMessage) {
+      sendingLockRef.current = false;
       toast({ title: t('common.error'), description: t('sendSms.error.fillFields'), variant: "destructive" });
       return;
     }
@@ -403,36 +446,23 @@ export default function SendSMS() {
     <div className="min-h-screen bg-background">
       <DashboardHeader />
       <div className="mx-[2cm] p-6 space-y-6">
-        <div className="mb-3 flex items-center gap-3">
-          <Link href={isAdmin ? "/admin" : (isSupervisor ? "/adminsup" : "/dashboard")}>
-            <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
-              <ArrowLeft className="h-5 w-5" strokeWidth={3} />
-            </Button>
-          </Link>
-          <div>{/* Page title moved to header bar; keep minimal spacing */}</div>
-        </div>
-
-        {(isAdmin || isSupervisor) && (
-          <Card>
-            <CardHeader>
-              <CardTitle>{isSupervisor ? t('sendSms.supervisorDirectMode') : t('sendSms.adminMode')}</CardTitle>
-              <CardDescription>{t('sendSms.selectClient')}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <ClientSelector 
-                selectedClientId={selectedClientId}
-                onClientChange={setSelectedClientId}
-                isAdminMode={isAdminMode}
-                onAdminModeChange={setIsAdminMode}
-                modeLabel={isSupervisor ? t('sendSms.supervisorDirectMode') : 'Admin Direct Mode'}
-              />
-              <p className="mt-2 text-xs text-muted-foreground">
-                {isAdminMode
-                  ? 'Admin Direct Mode: sends are audited under admin and not charged; client will not see these logs.'
-                  : 'Selecting a client ensures credits are deducted and logs appear in that client\'s history.'}
-              </p>
-            </CardContent>
-          </Card>
+        {(isAdmin || isSupervisor) ? (
+          <AdminModeBar
+            selectedClientId={selectedClientId}
+            onClientChange={setSelectedClientId}
+            isAdminMode={isAdminMode}
+            onAdminModeChange={setIsAdminMode}
+            isSupervisor={isSupervisor}
+            backHref={isAdmin ? "/admin" : "/adminsup"}
+          />
+        ) : (
+          <div className="flex items-center gap-3">
+            <Link href="/dashboard">
+              <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
+                <ArrowLeft className="h-5 w-5" strokeWidth={3} />
+              </Button>
+            </Link>
+          </div>
         )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>

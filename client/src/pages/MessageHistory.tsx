@@ -9,7 +9,7 @@ import { ArrowLeft, Search, RefreshCw, Clock } from "lucide-react";
 import { Link } from "wouter";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { ClientSelector } from "@/components/ClientSelector";
+import { AdminModeBar } from "@/components/AdminModeBar";
 import { DashboardHeader } from "@/components/DashboardHeader";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -294,31 +294,23 @@ export default function MessageHistory() {
     <div className="min-h-screen bg-background">
       <DashboardHeader />
       <div className="p-6 space-y-6">
-        <div className="flex items-center gap-3">
-          <Link href={profile?.user?.role === 'admin' ? '/admin' : (profile?.user?.role === 'supervisor' ? '/adminsup' : '/dashboard')}>
-            <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
-              <ArrowLeft className="h-5 w-5" strokeWidth={3} />
-            </Button>
-          </Link>
-          <div className="flex-1">{/* Page title moved to header bar */}</div>
-        </div>
-
-        {(profile?.user?.role === 'admin' || profile?.user?.role === 'supervisor') && (
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">{profile?.user?.role === 'supervisor' ? t('sendSms.supervisorDirectMode') : t('messageHistory.adminMode')}</CardTitle>
-              <CardDescription>{t('messageHistory.selectClient')}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <ClientSelector 
-                selectedClientId={selectedClientId}
-                onClientChange={setSelectedClientId}
-                isAdminMode={isAdminMode}
-                onAdminModeChange={setIsAdminMode}
-                modeLabel={profile?.user?.role === 'supervisor' ? t('sendSms.supervisorDirectMode') : 'Admin Direct Mode'}
-              />
-            </CardContent>
-          </Card>
+        {(profile?.user?.role === 'admin' || profile?.user?.role === 'supervisor') ? (
+          <AdminModeBar
+            selectedClientId={selectedClientId}
+            onClientChange={setSelectedClientId}
+            isAdminMode={isAdminMode}
+            onAdminModeChange={setIsAdminMode}
+            isSupervisor={profile?.user?.role === 'supervisor'}
+            backHref={profile?.user?.role === 'admin' ? '/admin' : '/adminsup'}
+          />
+        ) : (
+          <div className="flex items-center gap-3">
+            <Link href="/dashboard">
+              <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
+                <ArrowLeft className="h-5 w-5" strokeWidth={3} />
+              </Button>
+            </Link>
+          </div>
         )}
 
         <Card>

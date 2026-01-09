@@ -1,8 +1,22 @@
 import axios from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SMSMessage, SMSResult } from '../shared/vendor-config';
 import { VendorManager } from './vendor-manager';
 import { VendorConfig } from '../shared/vendor-schema';
 import { SMSMessageEnhanced, VendorConfiguration } from '../shared/vendor-config-enhanced';
+import { webshareProxyManager } from './webshare-proxy';
+
+// Static US Proxy agent for TextBelt (fallback if Webshare not configured)
+const TEXTBELT_PROXY_URL = process.env.TEXTBELT_PROXY_URL;
+const staticProxyAgent = TEXTBELT_PROXY_URL ? new HttpsProxyAgent(TEXTBELT_PROXY_URL) : null;
+if (staticProxyAgent) {
+  console.log('[VendorService] Static TextBelt US proxy configured:', TEXTBELT_PROXY_URL?.replace(/\/\/.*@/, '//*****@'));
+}
+
+// Initialize Webshare proxy manager
+webshareProxyManager.initialize().catch(err => {
+  console.error('[VendorService] Webshare proxy init error:', err);
+});
 
 // Type alias for vendor (used by health/status checks)
 type SMSVendor = VendorConfig;
@@ -30,6 +44,7 @@ export class VendorService {
   async sendSMS(message: SMSMessage): Promise<SMSResult> {
     try {
       const activeVendor = this.vendorManager.getActiveVendor();
+      console.log('[VendorService] sendSMS called, active vendor:', activeVendor.id, activeVendor.type);
       
       // Update vendor state before sending
       const state = this.vendorManager.getVendorState(activeVendor.id);
@@ -41,7 +56,9 @@ export class VendorService {
       
       switch (activeVendor.type) {
         case 'textbelt':
+          console.log('[VendorService] Sending via TextBelt...');
           result = await this.sendViaTextBelt(message, activeVendor.config);
+          console.log('[VendorService] TextBelt result:', JSON.stringify(result));
           break;
         case 'extremesms':
           result = await this.sendViaExtremeSMS(message, activeVendor.config);
@@ -120,6 +137,9 @@ export class VendorService {
   }
 
   private async sendViaTextBelt(message: SMSMessageEnhanced, config: any): Promise<SMSResult> {
+    console.log('[TextBelt Send] Starting send to:', message.recipient);
+    console.log('[TextBelt Send] API Key (first 10 chars):', config.apiKey?.substring(0, 10) + '...');
+    
     const params = new URLSearchParams({
       phone: message.recipient,
       key: config.apiKey,
@@ -147,20 +167,46 @@ export class VendorService {
       params.append('webhookData', message.webhookData);
     }
 
-    const response = await axios.post(`${config.baseUrl}/text`, params, {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-    });
+    try {
+      const axiosConfig: any = {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      };
+      
+      // Try Webshare rotating proxy first, then fall back to static proxy
+      if (webshareProxyManager.isEnabled()) {
+        const proxyAgent = await webshareProxyManager.getProxyAgent();
+        if (proxyAgent) {
+          axiosConfig.httpsAgent = proxyAgent;
+          console.log('[TextBelt Send] Using Webshare rotating proxy');
+        }
+      } else if (staticProxyAgent) {
+        axiosConfig.httpsAgent = staticProxyAgent;
+        console.log('[TextBelt Send] Using static US proxy');
+      }
+      
+      const response = await axios.post(`${config.baseUrl}/text`, params, axiosConfig);
 
-    const data = response.data;
-    return {
-      success: data.success,
-      messageId: data.textId,
-      vendorMessageId: data.textId,
-      cost: 0,
-      vendor: 'textbelt',
-    };
+      const data = response.data;
+      console.log('[TextBelt Send] Response:', JSON.stringify(data));
+      return {
+        success: data.success,
+        messageId: data.textId,
+        vendorMessageId: data.textId,
+        cost: 0,
+        vendor: 'textbelt',
+        error: data.error || undefined,
+      };
+    } catch (error: any) {
+      console.error('[TextBelt Send] Error:', error.response?.data || error.message);
+      return {
+        success: false,
+        cost: 0,
+        vendor: 'textbelt',
+        error: error.response?.data?.error || error.message,
+      };
+    }
   }
 
   private async sendViaExtremeSMS(message: SMSMessage, config: any): Promise<SMSResult> {

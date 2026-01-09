@@ -14,10 +14,13 @@ param(
     [switch]$SkipBuild,
     [switch]$FrontendOnly,
     [switch]$BackendOnly,
-    [string]$Server = "151.243.109.66"
+    [string]$Server = "151.243.109.66",
+    [string]$User = "root",
+    [int]$Port = 22,
+    [string]$IdentityFile
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $StartTime = Get-Date
 
 function Write-Step { param($num, $text) Write-Host "`n[$num] $text" -ForegroundColor Cyan }
@@ -25,11 +28,46 @@ function Write-OK { param($text) Write-Host "    [OK] $text" -ForegroundColor Gr
 function Write-Warn { param($text) Write-Host "    [!] $text" -ForegroundColor Yellow }
 function Write-Fail { param($text) Write-Host "    [X] $text" -ForegroundColor Red }
 
+function Get-SshBaseArgs {
+    $args = @("-p", "$Port")
+    if ($IdentityFile -and $IdentityFile.Trim().Length -gt 0) {
+        $args += @("-i", $IdentityFile)
+    }
+    return $args
+}
+
+function Invoke-SSH {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command
+    )
+
+    $dest = "${User}@${Server}"
+    $sshArgs = @(Get-SshBaseArgs) + @($dest, $Command)
+    & ssh @sshArgs 2>&1
+}
+
+function Invoke-SCP {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Dest
+    )
+
+    $scpArgs = @("-P", "$Port")
+    if ($IdentityFile -and $IdentityFile.Trim().Length -gt 0) {
+        $scpArgs += @("-i", $IdentityFile)
+    }
+    $scpArgs += @($Source, $Dest)
+    & scp @scpArgs
+}
+
 Write-Host "`n" -NoNewline
 Write-Host "=============================================" -ForegroundColor Magenta
 Write-Host "  IBIKI SMS - BULLETPROOF DEPLOYMENT" -ForegroundColor Magenta
 Write-Host "=============================================" -ForegroundColor Magenta
-Write-Host "  Server: $Server" -ForegroundColor Gray
+Write-Host "  Server: $($User)@$($Server):$Port" -ForegroundColor Gray
+if ($IdentityFile -and $IdentityFile.Trim().Length -gt 0) {
+    Write-Host "  SSH Key: $IdentityFile" -ForegroundColor Gray
+}
 Write-Host "  Time:   $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Gray
 Write-Host "=============================================" -ForegroundColor Magenta
 
@@ -87,7 +125,7 @@ Write-Step "3/5" "Uploading to server..."
 
 if (-not $FrontendOnly) {
     Write-Host "    Uploading backend (dist/index.js)..." -ForegroundColor Gray
-    scp dist/index.js "root@${Server}:/opt/ibiki-sms/dist/" 2>&1 | Out-Null
+    Invoke-SCP -Source "dist/index.js" -Dest "${User}@${Server}:/opt/ibiki-sms/dist/" 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Write-OK "Backend uploaded"
     } else {
@@ -98,7 +136,7 @@ if (-not $FrontendOnly) {
 
 if (-not $BackendOnly) {
     Write-Host "    Uploading frontend bundle ($zipSize MB)..." -ForegroundColor Gray
-    scp deploy-bundle.zip "root@${Server}:/tmp/" 2>&1 | Out-Null
+    Invoke-SCP -Source "deploy-bundle.zip" -Dest "${User}@${Server}:/tmp/" 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Write-OK "Frontend bundle uploaded"
     } else {
@@ -117,12 +155,12 @@ if (-not $BackendOnly) {
     # The zip now contains: assets/, index.html, favicon.png with proper paths
     $extractCmd = "cd /opt/ibiki-sms/dist/public && rm -rf assets.backup 2>/dev/null && mv assets assets.backup 2>/dev/null && unzip -o /tmp/deploy-bundle.zip && rm -rf assets.backup && rm /tmp/deploy-bundle.zip && echo EXTRACTED_OK"
     
-    $result = ssh "root@$Server" $extractCmd 2>&1
+    $result = Invoke-SSH -Command $extractCmd 2>&1
     if ($result -match "EXTRACTED_OK") {
         Write-OK "Assets extracted on server"
     } else {
         Write-Warn "Extraction may have had issues, restoring backup..."
-        ssh "root@$Server" "cd /opt/ibiki-sms/dist/public && mv assets.backup assets 2>/dev/null"
+        Invoke-SSH -Command "cd /opt/ibiki-sms/dist/public && mv assets.backup assets 2>/dev/null" | Out-Null
         Write-Fail "Deployment failed, rolled back"
         exit 1
     }
@@ -135,18 +173,18 @@ Write-Step "5/5" "Restarting services..."
 
 # Restart PM2
 Write-Host "    Restarting PM2..." -ForegroundColor Gray
-ssh "root@$Server" "pm2 restart ibiki-sms" 2>&1 | Out-Null
+Invoke-SSH -Command "pm2 restart ibiki-sms" 2>&1 | Out-Null
 
 # Reload nginx
 Write-Host "    Reloading nginx..." -ForegroundColor Gray
-ssh "root@$Server" "nginx -s reload 2>&1" | Out-Null
+Invoke-SSH -Command "nginx -s reload 2>&1" | Out-Null
 
 # Wait for startup
 Write-Host "    Waiting for server startup..." -ForegroundColor Gray
 Start-Sleep -Seconds 3
 
 # Health check
-$health = ssh "root@$Server" "curl -s http://127.0.0.1:5000/api/health" 2>&1
+$health = Invoke-SSH -Command "curl -s http://127.0.0.1:5000/api/health" 2>&1
 if ($health -match '"status":"healthy"') {
     Write-OK "Server is healthy!"
 } else {
@@ -154,7 +192,7 @@ if ($health -match '"status":"healthy"') {
 }
 
 # Verify key assets exist
-$keyAssets = ssh "root@$Server" "ls /opt/ibiki-sms/dist/public/assets/*.js 2>/dev/null | wc -l"
+$keyAssets = Invoke-SSH -Command "ls /opt/ibiki-sms/dist/public/assets/*.js 2>/dev/null | wc -l"
 Write-OK "$keyAssets JavaScript assets deployed"
 
 # =============================================================================

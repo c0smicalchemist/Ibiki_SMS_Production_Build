@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Inbox as InboxIcon, MessageSquare, ArrowLeft } from "lucide-react";
 import { Link } from "wouter";
 import { format } from "date-fns";
-import { ClientSelector } from "@/components/ClientSelector";
+import { AdminModeBar } from "@/components/AdminModeBar";
 import { DashboardHeader } from "@/components/DashboardHeader";
 import ConversationInline from "@/components/ConversationInline";
 import { useLanguage } from "@/contexts/LanguageContext";
@@ -311,36 +311,23 @@ export default function Inbox() {
     <div className="min-h-screen bg-background">
       <DashboardHeader />
       <div className="mx-[2cm] p-6 space-y-6">
-        <div className="mb-4">
+        {(isAdmin || isSupervisor) ? (
+          <AdminModeBar
+            selectedClientId={selectedClientId}
+            onClientChange={setSelectedClientId}
+            isAdminMode={isAdminMode}
+            onAdminModeChange={setIsAdminMode}
+            isSupervisor={isSupervisor}
+            backHref={isAdmin ? "/admin" : "/adminsup"}
+          />
+        ) : (
           <div className="flex items-center gap-3">
-            <Link href={isAdmin ? "/admin" : (isSupervisor ? "/adminsup" : "/dashboard")}>
+            <Link href="/dashboard">
               <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
                 <ArrowLeft className="h-5 w-5" strokeWidth={3} />
               </Button>
             </Link>
-            <div className="flex-1 min-w-0">
-              {/* Page title moved to header bar; keep minimal spacing here */}
-            </div>
           </div>
-          
-        </div>
-
-        {(isAdmin || isSupervisor) && (
-          <Card>
-            <CardHeader className="py-2">
-              <CardTitle>{isSupervisor ? 'Supervisor Mode' : t('inbox.adminMode')}</CardTitle>
-              <CardDescription>{t('inbox.selectClient')}</CardDescription>
-            </CardHeader>
-            <CardContent className="py-2">
-              <ClientSelector 
-                selectedClientId={selectedClientId}
-                onClientChange={setSelectedClientId}
-                isAdminMode={isAdminMode}
-                onAdminModeChange={setIsAdminMode}
-                modeLabel={isSupervisor ? 'Supervisor Mode' : 'Admin Direct Mode'}
-              />
-            </CardContent>
-          </Card>
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-[400px_1fr] gap-4">
@@ -362,7 +349,7 @@ export default function Inbox() {
                   <div className="mt-6 flex items-center gap-2 justify-center">
                     <Button onClick={seedExample} data-testid="button-seed-example-client">Add Example (Selected Client)</Button>
                     <Button variant="outline" onClick={seedExampleForAdmin} data-testid="button-seed-example-admin">Add Example (Admin)</Button>
-                    <Button variant="destructive" onClick={deleteExample} data-testid="button-delete-example">Delete Example</Button>
+                    <Button variant="outline-destructive" onClick={deleteExample} data-testid="button-delete-example">Delete Example</Button>
                   </div>
                 )}
               </CardContent>
@@ -375,44 +362,40 @@ export default function Inbox() {
                     <div className="flex items-center gap-2 flex-1 min-w-0">
                       <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t('inbox.search')} className="w-full" />
                     </div>
-                    <div className="flex items-center gap-2 ml-auto">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 px-2 min-w-[3.5rem] flex flex-col items-center justify-center bg-gray-500 text-white border-none"
-                        title="All"
-                        disabled
-                      >
-                        <span className="text-sm font-bold leading-none">{messages.length.toLocaleString()}</span>
-                        <span className="text-[11px] opacity-80 leading-none mt-0.5">{t('inbox.indicator.all')}</span>
-                      </Button>
+                    <div className="flex items-center gap-1.5 ml-auto">
+                      <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                        <span className="text-lg font-semibold text-slate-700 dark:text-slate-200">{messages.length.toLocaleString()}</span>
+                        <span className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">{t('inbox.indicator.all')}</span>
+                      </div>
                       <UnreadIndicator userId={effectiveUserId} isAdmin={isAdmin} />
                     </div>
                   </div>
                 </CardHeader>
                 <CardContent className="p-0">
-                  <div className="flex items-center gap-2 px-4 pb-2">
+                  <div className="flex items-center gap-2 px-4 py-2 border-b bg-muted/30">
                     <Button
                       size="sm"
                       onClick={() => setViewFavorites(v => !v)}
-                      className={`${viewFavorites ? 'h-7 px-3 bg-yellow-100 text-yellow-800 border border-yellow-500 hover:bg-yellow-200 flex items-center gap-2' : 'h-7 px-3 flex items-center gap-2'} `}
-                      variant={viewFavorites ? 'outline' : 'outline'}
+                      className={`h-7 px-3 ${viewFavorites ? 'bg-yellow-100 text-yellow-800 border-yellow-400 hover:bg-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-700' : ''}`}
+                      variant="outline"
                     >
-                      <Star className={`h-4 w-4 ${viewFavorites ? 'text-yellow-600' : ''}`} />
-                      <span>{t('inbox.favorites')}</span>
+                      <Star className={`h-3.5 w-3.5 ${viewFavorites ? 'fill-yellow-500 text-yellow-600' : ''}`} />
+                      <span className="ml-1">{t('inbox.favorites')}</span>
                     </Button>
                     <Button
                       size="sm"
                       onClick={() => setShowDeleted(d => !d)}
-                      className={`h-7 px-3 ${showDeleted ? 'bg-red-100 text-red-800 border border-red-500 hover:bg-red-200' : ''}`}
-                      variant={showDeleted ? 'outline' : 'outline'}
+                      className={`h-7 px-3 ${showDeleted ? 'bg-red-100 text-red-700 border-red-400 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-700' : ''}`}
+                      variant="outline"
                     >
-                      <span className="inline-flex items-center gap-1"><Trash2 className="h-3 w-3" /> Deleted</span>
+                      <Trash2 className="h-3.5 w-3.5" />
+                      <span className="ml-1">Deleted</span>
                     </Button>
                     {showDeleted && (
                       <Button
                         size="sm"
-                        variant="destructive"
+                        variant="outline-destructive"
+                        className="h-7"
                         onClick={async () => {
                           try {
                             const token = localStorage.getItem('token');
@@ -428,15 +411,21 @@ export default function Inbox() {
                           } catch {}
                         }}
                       >
-                        Purge
+                        Purge All
                       </Button>
                     )}
-                    <select className="border rounded px-2 py-1 text-xs" value={sortOrder} onChange={(e) => setSortOrder(e.target.value as any)}>
-                      <option value="newest">{t('inbox.sort.mostRecent')}</option>
-                      <option value="oldest">{t('inbox.sort.oldest')}</option>
-                    </select>
+                    <div className="ml-auto">
+                      <select 
+                        className="h-7 px-2 text-xs border rounded-md bg-background hover:bg-muted/50 cursor-pointer focus:outline-none focus:ring-1 focus:ring-ring" 
+                        value={sortOrder} 
+                        onChange={(e) => setSortOrder(e.target.value as any)}
+                      >
+                        <option value="newest">{t('inbox.sort.mostRecent')}</option>
+                        <option value="oldest">{t('inbox.sort.oldest')}</option>
+                      </select>
+                    </div>
                   </div>
-                  <div className="h-[72vh] overflow-y-scroll overflow-x-hidden">
+                  <div className="h-[72vh] overflow-y-auto">
                     {Object.entries(groupedMessages)
                       .filter(([phone, msgs]: any[]) => {
                         const q = search.trim().toLowerCase();
@@ -456,23 +445,38 @@ export default function Inbox() {
                         const tb = new Date(((msgsB.slice().sort((x:any,y:any)=>new Date((y.timestamp||y.createdAt)).getTime()-new Date((x.timestamp||x.createdAt)).getTime()))[0]||{}).timestamp || ((msgsB[0]||{}).createdAt||0)).getTime();
                         return sortOrder === 'newest' ? (tb - ta) : (ta - tb);
                       })
-                      .map(([phone, msgs]: any[]) => {
+                      .map(([phone, msgs]: any[], index: number) => {
                         const latest = (msgs as any[]).slice().sort((a: any, b: any) => new Date((b.timestamp||b.createdAt)).getTime() - new Date((a.timestamp||a.createdAt)).getTime())[0];
                         const dt = new Date((latest as any).timestamp || (latest as any).createdAt);
                         const hasUnread = (msgs as any[]).some((m: any) => !m.isRead);
                         const isBlacklisted = (msgs as any[]).some((m: any) => /blacklist|blocked/i.test(String(m.status||'')) || !!m.matchedBlockWord);
+                        const isFavorite = favorites.includes(String(phone));
                         const lastInboundTs = new Date(((latest as any).timestamp || (latest as any).createdAt)).getTime();
                         const pendingReply = lastInboundTs > (lastOutByPhone[String(phone)] || 0);
                         return (
-                          <div key={phone} className={`p-2 border-b cursor-pointer ${selectedPhoneNumber === phone ? 'bg-muted' : ''}`} onClick={() => setSelectedPhoneNumber(phone)}>
-                            <div className="text-sm font-semibold flex items-center gap-2">
-                              {t('inbox.from')}: <span className="font-mono">{String(phone)}</span>
-                              <span className="text-[11px] text-muted-foreground ml-2">{format(dt, 'yyyy-MM-dd HH:mm')}</span>
-                              {hasUnread && <span className="inline-block w-2 h-2 rounded-full bg-blue-600" title="Unread" />}
-                              {isBlacklisted && <span className="text-[11px] font-semibold text-red-600">Blacklisted</span>}
+                          <div 
+                            key={phone} 
+                            className={`
+                              px-3 py-2.5 cursor-pointer transition-colors border-b border-border/50
+                              ${selectedPhoneNumber === phone 
+                                ? 'bg-primary/10 border-l-2 border-l-primary' 
+                                : index % 2 === 0 
+                                  ? 'bg-background hover:bg-muted/50' 
+                                  : 'bg-muted/20 hover:bg-muted/50'
+                              }
+                            `} 
+                            onClick={() => setSelectedPhoneNumber(phone)}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                {isFavorite && <Star className="h-3 w-3 text-yellow-500 fill-yellow-500 flex-shrink-0" />}
+                                <span className="font-mono font-medium text-sm truncate">{String(phone)}</span>
+                                {hasUnread && <span className="inline-block w-2 h-2 rounded-full bg-blue-600 flex-shrink-0" title="Unread" />}
+                                {isBlacklisted && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 flex-shrink-0">Blocked</span>}
+                              </div>
+                              <span className="text-[11px] text-muted-foreground whitespace-nowrap">{format(dt, 'MMM d, HH:mm')}</span>
                             </div>
-                            <div className="text-[11px] text-muted-foreground">{t('inbox.to')}: {(latest as any).receiver}</div>
-                            <div className="text-[11px] truncate mt-0.5">{(latest as any).message}</div>
+                            <div className="text-xs text-muted-foreground mt-1 truncate">{(latest as any).message}</div>
                           </div>
                         );
                       })}
@@ -572,15 +576,9 @@ function UnreadIndicator({ userId, isAdmin }: { userId?: string; isAdmin?: boole
   });
   const count = data?.unread ?? 0;
   return (
-    <Button
-      variant="default"
-      size="sm"
-      className="h-9 px-3 min-w-[4rem] flex flex-col items-center justify-center bg-blue-600 text-white disabled:opacity-100"
-      title={t('inbox.unreadIndicator')}
-      disabled
-    >
-      <span className="text-sm font-bold leading-none">{count.toLocaleString()}</span>
-      <span className="text-[11px] opacity-80 leading-none mt-0.5">{t('inbox.unreadIndicator')}</span>
-    </Button>
+    <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-blue-600 dark:bg-blue-700 border border-blue-500 dark:border-blue-600">
+      <span className="text-lg font-semibold text-white">{count.toLocaleString()}</span>
+      <span className="text-xs font-medium text-blue-100 uppercase tracking-wide">{t('inbox.unreadIndicator')}</span>
+    </div>
   );
 }

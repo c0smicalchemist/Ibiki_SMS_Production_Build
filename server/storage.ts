@@ -151,6 +151,9 @@ export interface IStorage {
   deleteExampleData(userId: string): Promise<void>;
   hasExampleData(userId: string): Promise<boolean>;
   
+  // Compliance methods
+  hasEverSentToRecipient(userId: string, recipientPhone: string): Promise<boolean>;
+  
   // Admin account lifecycle
   disableUser(userId: string): Promise<void>;
   deleteUser(userId: string): Promise<void>;
@@ -211,6 +214,21 @@ export class MemStorage {
     for (const i of this.incomingMessages.values()) if (i.userId === userId && i.isExample) return true;
     for (const m of this.messageLogs.values()) if (m.userId === userId && m.isExample) return true;
     for (const c of this.contacts.values()) if (c.userId === userId && c.isExample) return true;
+    return false;
+  }
+
+  // Compliance method: check if we've ever sent to this recipient
+  async hasEverSentToRecipient(userId: string, recipientPhone: string): Promise<boolean> {
+    const normalizedPhone = recipientPhone.replace(/\D/g, '');
+    for (const log of this.messageLogs.values()) {
+      if (log.userId !== userId) continue;
+      if (log.recipient && log.recipient.replace(/\D/g, '').includes(normalizedPhone)) return true;
+      if (log.recipients && Array.isArray(log.recipients)) {
+        for (const r of log.recipients) {
+          if (r.replace(/\D/g, '').includes(normalizedPhone)) return true;
+        }
+      }
+    }
     return false;
   }
 
@@ -980,7 +998,15 @@ export class DbStorage {
         if (process.env.POSTGRES_SSL === 'true') return true;
         return connectionString.includes('sslmode=require') || /neon\.tech|railway/i.test(connectionString);
       };
-      const poolOptions: any = { connectionString };
+      const poolOptions: any = { 
+        connectionString,
+        // Optimized pool settings for high-volume SMS processing
+        max: parseInt(process.env.DB_POOL_MAX || '20', 10), // Max connections per worker
+        min: parseInt(process.env.DB_POOL_MIN || '5', 10),  // Keep 5 connections ready
+        idleTimeoutMillis: 30000, // Close idle connections after 30s
+        connectionTimeoutMillis: 5000, // Fail fast on connection issues
+        statement_timeout: 10000, // 10s max query time
+      };
       if (shouldUseSSL()) poolOptions.ssl = { rejectUnauthorized: false };
       poolInstance = new Pool(poolOptions);
       dbInstance = drizzle(poolInstance, {
@@ -1344,6 +1370,26 @@ export class DbStorage {
   async createMessageLog(log: InsertMessageLog): Promise<MessageLog> {
     const result = await this.db.insert(messageLogs).values(log).returning();
     return result[0];
+  }
+
+  /**
+   * Batch insert message logs for high-volume SMS processing
+   * Reduces database round-trips by inserting multiple records at once
+   */
+  async batchCreateMessageLogs(logs: InsertMessageLog[]): Promise<MessageLog[]> {
+    if (logs.length === 0) return [];
+    
+    // Insert in chunks of 100 to avoid query size limits
+    const chunkSize = 100;
+    const results: MessageLog[] = [];
+    
+    for (let i = 0; i < logs.length; i += chunkSize) {
+      const chunk = logs.slice(i, i + chunkSize);
+      const inserted = await this.db.insert(messageLogs).values(chunk).returning();
+      results.push(...inserted);
+    }
+    
+    return results;
   }
 
   async getMessageLogsByUserId(userId: string, limit?: number): Promise<MessageLog[]> {
@@ -1763,6 +1809,26 @@ export class DbStorage {
     await this.db.delete(contacts).where(eq(contacts.userId, userId));
     await this.db.delete(contactGroups).where(eq(contactGroups.userId, userId));
     await this.db.delete(users).where(eq(users.id, userId));
+  }
+
+  // Compliance method: check if we've ever sent to this recipient
+  async hasEverSentToRecipient(userId: string, recipientPhone: string): Promise<boolean> {
+    // Normalize the phone number for comparison
+    const normalizedPhone = recipientPhone.replace(/\D/g, '');
+    const result = await this.db.select({ id: messageLogs.id })
+      .from(messageLogs)
+      .where(
+        sql`${messageLogs.userId} = ${userId} AND (
+          REPLACE(${messageLogs.recipient}, '-', '') LIKE ${'%' + normalizedPhone + '%'} OR
+          EXISTS (
+            SELECT 1 FROM unnest(${messageLogs.recipients}) AS r 
+            WHERE REPLACE(r, '-', '') LIKE ${'%' + normalizedPhone + '%'}
+          )
+        )`
+      )
+      .limit(1);
+    
+    return result.length > 0;
   }
 
   async getSyncStats(userId: string): Promise<{ total: number; synced: number; unsynced: number }> {
