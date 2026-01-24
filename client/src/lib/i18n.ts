@@ -14,6 +14,10 @@ export const translations: Record<Language, Record<string, string>> = {
     'common.next': 'Next',
     'common.active': 'Active',
     'common.inactive': 'Inactive',
+    'common.enabled': 'Enabled',
+    'common.disabled': 'Disabled',
+    'common.enable': 'Enable',
+    'common.disable': 'Disable',
     'common.refresh': 'Refresh',
 
     'dashboard.title': 'Dashboard',
@@ -305,6 +309,10 @@ export const translations: Record<Language, Record<string, string>> = {
     'common.next': '下一步',
     'common.active': '活跃',
     'common.inactive': '不活跃',
+    'common.enabled': '已启用',
+    'common.disabled': '已禁用',
+    'common.enable': '启用',
+    'common.disable': '禁用',
     'common.refresh': '刷新',
 
     'dashboard.title': '仪表盘',

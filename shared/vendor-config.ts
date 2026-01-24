@@ -20,6 +20,7 @@ export interface SMSResult {
   success: boolean;
   messageId?: string;
   vendorMessageId?: string;
+  status?: string;
   cost?: number;
   error?: string;
   vendor: string;

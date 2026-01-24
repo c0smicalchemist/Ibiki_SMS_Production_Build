@@ -33,7 +33,7 @@ export function ConversationDialog({ open, onClose, phoneNumber, userId, isAdmin
   const [replyText, setReplyText] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Fetch conversation history
+  // Fetch conversation history - ALWAYS enabled to maintain hook order
   const { data: conversationData, isLoading } = useQuery({
     queryKey: ['/api/web/inbox/conversation', phoneNumber, userId],
     queryFn: async () => {
@@ -47,7 +47,9 @@ export function ConversationDialog({ open, onClose, phoneNumber, userId, isAdmin
       if (!response.ok) throw new Error('Failed to fetch conversation');
       return response.json();
     },
-    enabled: open && !!phoneNumber,
+    enabled: true, // Always enabled to maintain consistent hook order
+    retry: false,
+    throwOnError: false,
   });
 
   const lastInbound = (() => {
@@ -93,9 +95,12 @@ export function ConversationDialog({ open, onClose, phoneNumber, userId, isAdmin
     }
   }, [open, phoneNumber]);
 
+  // Check if admin Direct Mode is enabled (from localStorage)
+  const isAdminDirectMode = isAdmin && localStorage.getItem('isAdminMode') === 'true';
+
   // Reply mutation
   const replyMutation = useMutation({
-    mutationFn: async (data: { to: string; message: string; userId?: string }) => {
+    mutationFn: async (data: { to: string; message: string; userId?: string; adminDirect?: boolean }) => {
       return await apiRequest('/api/web/inbox/reply', {
         method: 'POST',
         body: JSON.stringify(data)
@@ -118,12 +123,15 @@ export function ConversationDialog({ open, onClose, phoneNumber, userId, isAdmin
       toast({ title: t('common.error'), description: t('inbox.error.enterReply'), variant: "destructive" });
       return;
     }
-    const payload: { to: string; message: string; userId?: string } = {
+    const payload: { to: string; message: string; userId?: string; adminDirect?: boolean } = {
       to: phoneNumber,
       message: replyText
     };
     if (userId && isAdmin) {
       payload.userId = userId;
+    }
+    if (isAdminDirectMode) {
+      payload.adminDirect = true;
     }
     replyMutation.mutate(payload);
   };

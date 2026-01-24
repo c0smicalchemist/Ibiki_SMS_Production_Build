@@ -26,6 +26,7 @@ import vendorRoutes from "./routes/vendor-routes";
 import queueRoutes from "./routes/queue-routes";
 import { startSMSWorker } from "./sms-worker";
 import { SMSMessage } from "../shared/vendor-config";
+import { SMSMessageEnhanced } from "../shared/vendor-config-enhanced";
 import { env } from "./env";
 import { authLimiter, apiLimiter, webhookLimiter, generalLimiter } from "./middleware/rateLimitMiddleware";
 
@@ -36,6 +37,117 @@ const EXTREMESMS_BASE_URL = "https://extremesms.net";
 // Initialize vendor service
 const vendorService = new VendorService();
 
+// ==========================================
+// CLUSTER-SAFE DEDUPLICATION (Redis-based)
+// ==========================================
+// This prevents duplicate SMS when PM2 runs multiple workers
+// Uses Redis SETNX for atomic cluster-wide locks
+
+import Redis from 'ioredis';
+
+const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+const DEDUP_WINDOW_SECONDS = 30; // 30 seconds window to prevent duplicates
+
+// Lazy Redis connection (only create when needed)
+let dedupRedis: Redis | null = null;
+function getDedupRedis(): Redis | null {
+  if (!dedupRedis) {
+    try {
+      dedupRedis = new Redis(REDIS_URL, {
+        maxRetriesPerRequest: 1,
+        lazyConnect: true,
+        retryStrategy: () => null, // Don't retry on failure
+      });
+      dedupRedis.on('error', (err) => {
+        console.warn('[Dedup] Redis connection error:', err.message);
+        dedupRedis = null;
+      });
+    } catch (e) {
+      console.warn('[Dedup] Failed to create Redis connection:', e);
+      return null;
+    }
+  }
+  return dedupRedis;
+}
+
+// Fallback in-memory cache (for when Redis is unavailable)
+const recentSendCache = new Map<string, number>();
+const DEDUP_WINDOW_MS = DEDUP_WINDOW_SECONDS * 1000;
+
+function createDedupeKey(userId: string, recipient: string, message: string): string {
+  // Create a hash that includes the content fingerprint
+  const contentHash = crypto.createHash('md5').update(message.substring(0, 100)).digest('hex').substring(0, 8);
+  return `sms:dedup:${userId}:${recipient}:${contentHash}`;
+}
+
+async function isDuplicateSendAsync(userId: string, recipient: string, message: string): Promise<boolean> {
+  const key = createDedupeKey(userId, recipient, message);
+  const now = Date.now();
+  
+  // Try Redis first (cluster-safe)
+  const redis = getDedupRedis();
+  if (redis) {
+    try {
+      // Use SET with NX (only set if not exists) and EX (expiration)
+      // Returns 'OK' if key was set (new request), null if key exists (duplicate)
+      const result = await redis.set(key, now.toString(), 'EX', DEDUP_WINDOW_SECONDS, 'NX');
+      
+      if (result === null) {
+        console.log(`[Dedup-Redis] Blocked duplicate send: ${key}`);
+        return true; // Key exists = duplicate
+      }
+      
+      console.log(`[Dedup-Redis] Allowed send: ${key}`);
+      return false; // Key was set = new request
+    } catch (e: any) {
+      console.warn('[Dedup-Redis] Redis error, falling back to memory:', e.message);
+    }
+  }
+  
+  // Fallback to in-memory (works within single process)
+  const lastSend = recentSendCache.get(key);
+  
+  if (lastSend && (now - lastSend) < DEDUP_WINDOW_MS) {
+    console.log(`[Dedup-Memory] Blocked duplicate send: ${key} (${now - lastSend}ms since last)`);
+    return true;
+  }
+  
+  recentSendCache.set(key, now);
+  
+  // Cleanup old entries
+  if (recentSendCache.size > 100) {
+    for (const [k, v] of recentSendCache.entries()) {
+      if (now - v > DEDUP_WINDOW_MS) recentSendCache.delete(k);
+    }
+  }
+  
+  return false;
+}
+
+// Sync wrapper for backward compatibility
+function isDuplicateSend(userId: string, recipient: string, message: string): boolean {
+  // This is used in sync contexts - just use memory cache
+  const key = createDedupeKey(userId, recipient, message);
+  const now = Date.now();
+  const lastSend = recentSendCache.get(key);
+  
+  if (lastSend && (now - lastSend) < DEDUP_WINDOW_MS) {
+    console.log(`[Dedup] Blocked duplicate send: ${key} (${now - lastSend}ms since last)`);
+    return true;
+  }
+  
+  recentSendCache.set(key, now);
+  
+  // Cleanup old entries
+  if (recentSendCache.size > 100) {
+    for (const [k, v] of recentSendCache.entries()) {
+      if (now - v > DEDUP_WINDOW_MS) recentSendCache.delete(k);
+    }
+  }
+  
+  return false;
+}
+
 function getHourInZone(tz: string) {
   try {
     const d = new Date();
@@ -45,14 +157,37 @@ function getHourInZone(tz: string) {
   } catch { return { hour: 0, minute: 0 }; }
 }
 function isRoutesOpenNow() {
-  const pst = getHourInZone('America/Los_Angeles');
-  const est = getHourInZone('America/New_York');
-  const afterPst9 = pst.hour >= 9;
-  const beforeEst20 = est.hour < 20;
-  return afterPst9 && beforeEst20;
+  // Route hours: 8:00 AM PST (GMT-8) to 9:00 PM EST (GMT-5)
+  // Since 9 PM EST = 6 PM PST, we can simplify: open from 8 AM to 6 PM PST
+  const pst = getHourInZone('America/Los_Angeles'); // GMT-8
+  const pstHour = pst.hour;
+  
+  // Open from 8:00 AM PST (hour >= 8) until 6:00 PM PST (hour < 18)
+  // 6 PM PST = 9 PM EST
+  const isOpen = pstHour >= 8 && pstHour < 18;
+  console.log(`[Routes] PST hour: ${pstHour}, isOpen: ${isOpen} (8AM-6PM PST = 8AM PST to 9PM EST)`);
+  return isOpen;
 }
 async function canSendSingle(req: any) {
+  // If routes are open, anyone can send
   if (isRoutesOpenNow()) return true;
+
+  // If the request contains a recipient and there is a recent inbound message
+  // for this user and recipient, allow reply even when routes are closed.
+  try {
+    const bodyRecipient = req?.body?.recipient || req?.body?.to || null;
+    if (bodyRecipient) {
+      const defaultDial = String(req?.body?.defaultDial || '+1');
+      const normalized = normalizePhone(String(bodyRecipient), defaultDial);
+      if (normalized) {
+        const lastInbound = await storage.getLastInboundForUserAndRecipient(req.user.userId, normalized);
+        if (lastInbound) return true;
+      }
+    }
+  } catch (e) {
+    // ignore storage errors and fall through to role checks
+  }
+
   const role = String(req.user?.role || '').toLowerCase();
   if (role === 'admin' || role === 'supervisor') {
     try {
@@ -75,7 +210,7 @@ function isAfterClosedEst(d: Date) {
   } catch { return false; }
 }
 function closedMessage() {
-  return { error: 'Routes Closed', details: 'Open after 09:00 GMT-8 and closed after 20:00 GMT-5. Admin/Supervisor may enable single-SMS override.' };
+  return { error: 'Routes Closed', details: 'Open after 21:00 GMT-8 and closed after 20:00 GMT-5. Admin/Supervisor may enable single-SMS override.' };
 }
 
 // Compliance helper: Apply sender name and opt-out text to messages
@@ -195,6 +330,28 @@ function requireRole(roles: string[]) {
   };
 }
 
+// Middleware to block routes during maintenance mode (admins exempt)
+async function checkMaintenanceMode(req: any, res: any, next: any) {
+  try {
+    // Allow admins to bypass maintenance mode
+    if (req.user?.role === 'admin') {
+      return next();
+    }
+
+    const mode = await storage.getSystemConfig('maintenance_mode');
+    if (mode?.value === 'true') {
+      return res.status(503).json({ 
+        error: "System under maintenance",
+        message: "The system is currently under maintenance. Please try again later."
+      });
+    }
+    next();
+  } catch (error) {
+    // On error, allow the request to continue (fail-open)
+    next();
+  }
+}
+
 // Middleware to authenticate API key (for client API requests)
 async function authenticateApiKey(req: any, res: any, next: any) {
   const authHeader = req.headers["authorization"];
@@ -263,7 +420,8 @@ async function deductCreditsAndLog(
   responsePayload: any,
   recipient?: string,
   recipients?: string[],
-  senderPhoneNumber?: string
+  senderPhoneNumber?: string,
+  vendorMessageId?: string  // TextBelt textId or other vendor's message ID for webhook reply matching
 ) {
   const { extremeCost, clientRate } = await getPricingConfig(userId);
   const totalCost = extremeCost * messageCount;
@@ -282,6 +440,25 @@ async function deductCreditsAndLog(
 
   const newCredits = currentCredits - creditsToDeduct;
 
+  // Idempotency guard: if we've already recorded a message log for this messageId
+  // and a corresponding credit transaction exists, skip charging again.
+  try {
+    const existingLog = await storage.getMessageLogByMessageId(messageId);
+    if (existingLog) {
+      // Check for existing credit transaction linked to this message log
+      const txs = await storage.getCreditTransactionsByUserId(userId, 200);
+      const found = txs.find(t => String(t.messageLogId) === String(existingLog.id));
+      if (found) {
+        console.log(`[Billing] Skipping duplicate billing for messageId=${messageId} (tx ${found.id})`);
+        return { messageLog: existingLog, newBalance: profile.credits };
+      }
+      // If log exists but no tx, link the credit transaction to existing log instead of creating duplicate logs
+    }
+  } catch (e) {
+    // On any storage error, proceed as before (avoid blocking sends)
+    console.error('[Billing] Idempotency check failed:', e?.message || e);
+  }
+
   // Extract sender phone from response if available, otherwise fall back to client's assigned number
   let senderPhone = senderPhoneNumber || 
                     responsePayload?.senderPhone || 
@@ -294,12 +471,19 @@ async function deductCreditsAndLog(
       if (Array.isArray(assigned) && assigned.length > 0) senderPhone = assigned[0];
     } catch {}
   }
+  
+  // Extract vendorMessageId from response if not explicitly provided
+  const finalVendorMessageId = vendorMessageId || 
+                                responsePayload?.vendorMessageId || 
+                                responsePayload?.textId || 
+                                null;
 
   // Create message log
   const activeVendor = vendorService.getActiveVendor();
   const messageLog = await storage.createMessageLog({
     userId,
     messageId,
+    vendorMessageId: finalVendorMessageId,  // Save TextBelt textId for webhook reply matching
     vendor: activeVendor.id,
     endpoint,
     recipient: recipient || null,
@@ -535,11 +719,39 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Levenshtein distance for similarity detection (anti-spam variety)
+  function levenshteinDistance(a: string, b: string): number {
+    const matrix = Array(b.length + 1).fill(null).map(() => Array(a.length + 1).fill(null));
+    
+    for (let i = 0; i <= a.length; i++) matrix[0][i] = i;
+    for (let j = 0; j <= b.length; j++) matrix[j][0] = j;
+    
+    for (let j = 1; j <= b.length; j++) {
+      for (let i = 1; i <= a.length; i++) {
+        const indicator = a[i - 1] === b[j - 1] ? 0 : 1;
+        matrix[j][i] = Math.min(
+          matrix[j][i - 1] + 1,
+          matrix[j - 1][i] + 1,
+          matrix[j - 1][i - 1] + indicator
+        );
+      }
+    }
+    
+    return matrix[b.length][a.length];
+  }
+
+  function calculateSimilarity(a: string, b: string): number {
+    const distance = levenshteinDistance(a, b);
+    const maxLen = Math.max(a.length, b.length);
+    return maxLen === 0 ? 1 : 1 - (distance / maxLen);
+  }
+
   app.post('/api/tools/paraphrase', authenticateToken, async (req: any, res) => {
     try {
       const { text, n = 5, creativity = 0.5, lang = 'en', includeLink = false } = req.body || {};
       if (!text || typeof text !== 'string') return res.status(400).json({ error: 'text required' });
       const count = Math.max(1, Math.min(25, parseInt(String(n)) || 5));
+      const SIMILARITY_THRESHOLD = parseFloat(process.env.PHRASER_SIMILARITY_THRESHOLD || '0.75');
       const cfg = await getParaphraserConfig();
       const placeholders: Record<string,string> = {};
       const urlPlaceholders: Set<string> = new Set();
@@ -566,27 +778,70 @@ export async function registerRoutes(app: Express): Promise<Server> {
       let variants: any[] = [];
       let providerUsed: 'openrouter' | 'ollama' | 'remote' | 'deepseek' | 'none' = 'none';
       if (cfg.provider === 'ollama') {
-        const temp = Math.max(0, Math.min(1, Number(creativity))) || 0.5;
+        const temperatures = [0.5, 0.7, 0.9, 1.1, 1.3];
+        const strategies = ['casual friendly', 'professional direct', 'question based', 'action oriented', 'conversational natural'];
         for (let i=0;i<count;i++) {
-          const prompt = `Paraphrase the following SMS. Preserve any tokens like {{name}} and any URLs exactly. Output only the paraphrase.\nText: ${protectedText}`;
+          const temp = temperatures[i % temperatures.length];
+          const strategy = strategies[i % strategies.length];
+          const prompt = `You are an expert SMS copywriter. Paraphrase this message with a ${strategy} tone. Do NOT add any placeholders, variables, or template markers. Keep it under 160 characters. Output ONLY the paraphrased text without any placeholders.\nText: ${protectedText}\n\nOutput ONLY the paraphrased text.`;
           const resp = await axios.post(`${cfg.url}/api/generate`, { model: cfg.model, prompt, stream: false, options: { temperature: temp } }, { timeout: 15000 });
           let out = String(resp.data?.response || protectedText);
           Object.keys(placeholders).forEach(k => { out = out.replace(new RegExp(k,'g'), placeholders[k]); });
           out = clamp(out);
           const id = crypto.randomBytes(8).toString('hex');
-          variants.push({ id, text: out, score: +(0.8).toFixed(2) });
+          variants.push({ id, text: out, score: +(0.8).toFixed(2), strategy });
         }
         providerUsed = 'ollama';
       } else if (cfg.provider === 'openrouter' && (cfg as any).key) {
-        const temp = Math.max(0, Math.min(1, Number(creativity))) || 0.5;
+        const temperatures = [0.5, 0.7, 0.9, 1.1, 1.3];
+        const baseTemp = temperatures[Math.floor(Math.random() * 3)]; // Random base: 0.5, 0.7, or 0.9
         const minChars = (cfg as any).rules?.targetMin || 145;
         const maxChars = (cfg as any).rules?.targetMax || 155;
         const grammar = ((cfg as any).rules?.enforceGrammar ? 'Ensure complete, grammatically correct sentences.' : '');
-        const prompt = `Paraphrase the following SMS into ${count} variants. ${grammar} Keep each variant between ${minChars}-${maxChars} characters and strictly under ${(cfg as any).rules?.maxChars || 160}. Preserve tokens like {{name}} and any URLs exactly. Place any URL token mid-sentence using natural phrasing. Prefer responding with a JSON object {"variants":[{"text":"...","score":0.9},...]}. If you cannot respond as JSON, respond with ${count} bullet lines, one variant per line.\nText: ${protectedText}`;
+        const strategies = [
+          'casual and friendly',
+          'professional and direct',
+          'question-based approach',
+          'action-oriented imperative',
+          'conversational natural flow',
+          'enthusiastic and excited',
+          'informative and helpful'
+        ];
+        const selectedStrategies = strategies.slice(0, Math.min(count, strategies.length));
+        const strategyInstructions = selectedStrategies.map((s, i) => `- Variant ${i+1}: ${s} tone`).join('\n');
+        const prompt = `You are an expert SMS copywriter creating ${count} DISTINCT variants that sound like different people wrote them.
+
+STRICT REQUIREMENTS:
+1. Length: ${minChars}-${maxChars} characters (HARD LIMIT: ${(cfg as any).rules?.maxChars || 160})
+2. Do NOT add ANY placeholders, template variables, or markers like {{name}}, {{company}}, etc.
+3. Write COMPLETE, NATURAL messages without any template syntax
+4. Preserve ALL URLs EXACTLY as shown
+5. Each variant must be MEANINGFULLY DIFFERENT in:
+   - Sentence structure (question vs statement vs imperative)
+   - Tone and word choice
+   - Punctuation style
+
+${grammar ? 'GRAMMAR: ' + grammar + '\n' : ''}VARIATION STRATEGIES:
+${strategyInstructions}
+
+Original: ${protectedText}
+
+Respond ONLY with JSON: {"variants":[{"text":"...","score":0.9,"strategy":"casual_friendly"},...]}`;
         const rawKey = String((cfg as any).key || '').trim();
         const authHeader = rawKey.startsWith('Bearer ') ? rawKey : `Bearer ${rawKey}`;
         const headers: Record<string,string> = { 'Content-Type': 'application/json', 'Authorization': authHeader };
-        const body = { model: (cfg as any).model || 'openrouter/auto', messages: [{ role: 'system', content: 'Paraphrase SMS while preserving placeholders and links; respond as JSON.' }, { role: 'user', content: prompt }], temperature: temp, response_format: { type: 'json_object' } };
+        const body = { 
+          model: (cfg as any).model || 'openrouter/auto', 
+          messages: [
+            { role: 'system', content: 'You are an expert SMS copywriter. Create diverse variants that sound natural and human-written. Always respond with valid JSON.' }, 
+            { role: 'user', content: prompt }
+          ], 
+          temperature: baseTemp,
+          top_p: 0.9,
+          frequency_penalty: 0.5,
+          presence_penalty: 0.3,
+          response_format: { type: 'json_object' } 
+        };
         try {
           const resp = await axios.post('https://openrouter.ai/api/v1/chat/completions', body, { headers, timeout: 20000 });
           let raw = String(resp.data?.choices?.[0]?.message?.content || '{}');
@@ -626,13 +881,42 @@ export async function registerRoutes(app: Express): Promise<Server> {
             variants.push({ id, text: out, score: +Number(score).toFixed(2) });
           }
           {
-            const seen = new Set<string>();
-            variants = variants.filter(v => { const norm = v.text.toLowerCase().replace(/\s+/g,' ').trim(); if (seen.has(norm)) return false; seen.add(norm); return true; });
+            // Similarity-based duplicate detection (anti-spam variety)
+            const diverseVariants: any[] = [];
+            const seenTexts: string[] = [];
+            
+            for (const v of variants) {
+              const norm = v.text.toLowerCase().replace(/\s+/g, ' ').trim();
+              
+              // Check against all existing variants
+              const isTooSimilar = seenTexts.some(existing => 
+                calculateSimilarity(existing, norm) > SIMILARITY_THRESHOLD
+              );
+              
+              if (!isTooSimilar) {
+                diverseVariants.push(v);
+                seenTexts.push(norm);
+              }
+            }
+            
+            variants = diverseVariants;
+            console.log(`✨ Filtered to ${variants.length} diverse variants (threshold: ${SIMILARITY_THRESHOLD})`);
           }
           if (variants.length < count) {
             const remain = count - variants.length;
             const prompt2 = `Provide ${remain} additional distinct variants that meet the same rules.\nText: ${protectedText}`;
-            const body2 = { model: (cfg as any).model || 'openrouter/auto', messages: [{ role: 'system', content: 'Paraphrase SMS while preserving placeholders and links; respond as JSON.' }, { role: 'user', content: prompt2 }], temperature: temp, response_format: { type: 'json_object' } };
+            const body2 = { 
+              model: (cfg as any).model || 'openrouter/auto', 
+              messages: [
+                { role: 'system', content: 'You are an expert SMS copywriter. Create diverse variants that sound natural and human-written. Always respond with valid JSON.' }, 
+                { role: 'user', content: prompt2 }
+              ], 
+              temperature: Math.min(1.3, baseTemp + 0.2),
+              top_p: 0.9,
+              frequency_penalty: 0.6,
+              presence_penalty: 0.4,
+              response_format: { type: 'json_object' } 
+            };
             try {
               const resp2 = await axios.post('https://openrouter.ai/api/v1/chat/completions', body2, { headers, timeout: 20000 });
               let raw2 = String(resp2.data?.choices?.[0]?.message?.content || '{}');
@@ -686,16 +970,55 @@ export async function registerRoutes(app: Express): Promise<Server> {
           providerUsed = 'none';
         }
       } else if (cfg.provider === 'deepseek' && (cfg as any).key) {
-        const temp = Math.max(0, Math.min(1, Number(creativity))) || 0.5;
+        const temperatures = [0.5, 0.7, 0.9, 1.1, 1.3];
+        const baseTemp = temperatures[Math.floor(Math.random() * 3)]; // Random base: 0.5, 0.7, or 0.9
         const minChars = (cfg as any).rules?.targetMin || 145;
         const maxChars = (cfg as any).rules?.targetMax || 155;
         const grammar = ((cfg as any).rules?.enforceGrammar ? 'Ensure complete, grammatically correct sentences.' : '');
-        const prompt = `Paraphrase the following SMS into ${count} variants. ${grammar} Keep each variant between ${minChars}-${maxChars} characters and strictly under ${(cfg as any).rules?.maxChars || 160}. Preserve tokens like {{name}} and any URLs exactly. Prefer responding with a JSON object {"variants":[{"text":"...","score":0.9},...]}. If you cannot respond as JSON, respond with ${count} bullet lines, one variant per line.\nText: ${protectedText}`;
+        const strategies = [
+          'casual and friendly',
+          'professional and direct',
+          'question-based approach',
+          'action-oriented imperative',
+          'conversational natural flow',
+          'enthusiastic and excited',
+          'informative and helpful'
+        ];
+        const selectedStrategies = strategies.slice(0, Math.min(count, strategies.length));
+        const strategyInstructions = selectedStrategies.map((s, i) => `- Variant ${i+1}: ${s} tone`).join('\n');
+        const prompt = `You are an expert SMS copywriter creating ${count} DISTINCT variants that sound like different people wrote them.
+
+STRICT REQUIREMENTS:
+1. Length: ${minChars}-${maxChars} characters (HARD LIMIT: ${(cfg as any).rules?.maxChars || 160})
+2. Do NOT add ANY placeholders, template variables, or markers like {{name}}, {{company}}, etc.
+3. Write COMPLETE, NATURAL messages without any template syntax
+4. Preserve ALL URLs EXACTLY as shown
+5. Each variant must be MEANINGFULLY DIFFERENT in:
+   - Sentence structure (question vs statement vs imperative)
+   - Tone and word choice
+   - Punctuation style
+
+${grammar ? 'GRAMMAR: ' + grammar + '\n' : ''}VARIATION STRATEGIES:
+${strategyInstructions}
+
+Original: ${protectedText}
+
+Respond ONLY with JSON: {"variants":[{"text":"...","score":0.9,"strategy":"casual_friendly"},...]}`;
         const rawKey = String((cfg as any).key || '').trim();
         const headers: Record<string,string> = { 'Content-Type': 'application/json', 'Authorization': rawKey.startsWith('Bearer ') ? rawKey : `Bearer ${rawKey}` };
         const model = (cfg as any).model || 'deepseek-chat';
         try {
-          const resp = await axios.post('https://api.deepseek.com/v1/chat/completions', { model, messages: [{ role: 'system', content: 'Paraphrase SMS while preserving placeholders and links; respond as JSON.' }, { role: 'user', content: prompt }], temperature: temp }, { headers, timeout: 20000 });
+          const resp = await axios.post('https://api.deepseek.com/v1/chat/completions', { 
+            model, 
+            messages: [
+              { role: 'system', content: 'You are an expert SMS copywriter. Create diverse variants that sound natural and human-written. Always respond with valid JSON.' }, 
+              { role: 'user', content: prompt }
+            ], 
+            temperature: baseTemp,
+            top_p: 0.9,
+            frequency_penalty: 0.5,
+            presence_penalty: 0.3
+          }, { headers, timeout: 20000 });
           let raw = String(resp.data?.choices?.[0]?.message?.content || '{}');
           raw = raw.replace(/^```json\s*/i,'').replace(/\s*```$/,'');
           let parsed: any = {}; try { parsed = JSON.parse(raw); } catch { parsed = {}; }
@@ -713,8 +1036,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
             variants.push({ id, text: out, score: +Number(score).toFixed(2) });
           }
           {
-            const seen = new Set<string>();
-            variants = variants.filter(v => { const norm = v.text.toLowerCase().replace(/\s+/g,' ').trim(); if (seen.has(norm)) return false; seen.add(norm); return true; });
+            // Similarity-based duplicate detection (anti-spam variety)
+            const diverseVariants: any[] = [];
+            const seenTexts: string[] = [];
+            
+            for (const v of variants) {
+              const norm = v.text.toLowerCase().replace(/\s+/g, ' ').trim();
+              
+              // Check against all existing variants
+              const isTooSimilar = seenTexts.some(existing => 
+                calculateSimilarity(existing, norm) > SIMILARITY_THRESHOLD
+              );
+              
+              if (!isTooSimilar) {
+                diverseVariants.push(v);
+                seenTexts.push(norm);
+              }
+            }
+            
+            variants = diverseVariants;
+            console.log(`✨ Filtered to ${variants.length} diverse variants (threshold: ${SIMILARITY_THRESHOLD})`);
           }
           providerUsed = variants.length === 0 ? 'none' : 'deepseek';
         } catch (err:any) {
@@ -724,14 +1065,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
             try {
               const keyOpen = String((await storage.getSystemConfig('paraphraser.openrouter.key'))?.value || process.env.OPENROUTER_API_KEY || '').trim();
               if (keyOpen) {
-                const temp2 = Math.max(0, Math.min(1, Number(creativity))) || 0.5;
+                const temp2 = 0.8; // Higher temp for fallback
                 const minChars2 = (cfg as any).rules?.targetMin || 145;
                 const maxChars2 = (cfg as any).rules?.targetMax || 155;
                 const grammar2 = ((cfg as any).rules?.enforceGrammar ? 'Ensure complete, grammatically correct sentences.' : '');
-                const prompt2 = `Paraphrase the following SMS into ${count} variants. ${grammar2} Keep each variant between ${minChars2}-${maxChars2} characters and strictly under ${(cfg as any).rules?.maxChars || 160}. Preserve tokens like {{name}} and any URLs exactly. Prefer responding with a JSON object {"variants":[{"text":"...","score":0.9},...]}. If you cannot respond as JSON, respond with ${count} bullet lines, one variant per line.\nText: ${protectedText}`;
+                const strategies2 = [
+                  'casual and friendly',
+                  'professional and direct',
+                  'question-based approach',
+                  'action-oriented imperative',
+                  'conversational natural flow'
+                ];
+                const selectedStrategies2 = strategies2.slice(0, Math.min(count, strategies2.length));
+                const strategyInstructions2 = selectedStrategies2.map((s, i) => `- Variant ${i+1}: ${s} tone`).join('\n');
+                const prompt2 = `You are an expert SMS copywriter creating ${count} DISTINCT variants.\n\nREQUIREMENTS:\n1. Length: ${minChars2}-${maxChars2} chars (MAX: ${(cfg as any).rules?.maxChars || 160})\n2. Preserve {{placeholders}} and URLs EXACTLY\n3. Each must differ in structure, tone, and word choice\n\n${grammar2 ? 'GRAMMAR: ' + grammar2 + '\n' : ''}STRATEGIES:\n${strategyInstructions2}\n\nOriginal: ${protectedText}\n\nJSON: {"variants":[{"text":"...","score":0.9},...]}`;
                 const authHeader = keyOpen.startsWith('Bearer ') ? keyOpen : `Bearer ${keyOpen}`;
                 const headers2: Record<string,string> = { 'Content-Type': 'application/json', 'Authorization': authHeader };
-                const body2 = { model: (await storage.getSystemConfig('paraphraser.openrouter.model'))?.value || 'openrouter/auto', messages: [{ role: 'system', content: 'Paraphrase SMS while preserving placeholders and links; respond as JSON.' }, { role: 'user', content: prompt2 }], temperature: temp2, response_format: { type: 'json_object' } };
+                const body2 = { 
+                  model: (await storage.getSystemConfig('paraphraser.openrouter.model'))?.value || 'openrouter/auto', 
+                  messages: [
+                    { role: 'system', content: 'You are an expert SMS copywriter. Create diverse variants that sound natural. Always respond with valid JSON.' }, 
+                    { role: 'user', content: prompt2 }
+                  ], 
+                  temperature: temp2,
+                  top_p: 0.9,
+                  frequency_penalty: 0.5,
+                  presence_penalty: 0.3,
+                  response_format: { type: 'json_object' } 
+                };
                 const resp2 = await axios.post('https://openrouter.ai/api/v1/chat/completions', body2, { headers: headers2, timeout: 20000 });
                 let raw2 = String(resp2.data?.choices?.[0]?.message?.content || '{}');
                 raw2 = raw2.replace(/^```json\s*/i,'').replace(/\s*```$/,'');
@@ -750,8 +1111,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
                   variants.push({ id, text: out, score: +Number(score).toFixed(2) });
                 }
                 {
-                  const seen = new Set<string>();
-                  variants = variants.filter(v => { const norm = v.text.toLowerCase().replace(/\s+/g,' ').trim(); if (seen.has(norm)) return false; seen.add(norm); return true; });
+                  // Similarity-based duplicate detection
+                  const diverseVariants: any[] = [];
+                  const seenTexts: string[] = [];
+                  
+                  for (const v of variants) {
+                    const norm = v.text.toLowerCase().replace(/\s+/g, ' ').trim();
+                    const isTooSimilar = seenTexts.some(existing => 
+                      calculateSimilarity(existing, norm) > SIMILARITY_THRESHOLD
+                    );
+                    if (!isTooSimilar) {
+                      diverseVariants.push(v);
+                      seenTexts.push(norm);
+                    }
+                  }
+                  variants = diverseVariants;
                 }
                 providerUsed = variants.length === 0 ? 'none' : 'openrouter';
               } else {
@@ -864,6 +1238,287 @@ export async function registerRoutes(app: Express): Promise<Server> {
       healthStatus.database = "error";
       
       res.json(healthStatus);
+    }
+  });
+
+  // ===========================================================================
+  // System Health Dashboard Endpoint (Admin Only)
+  // Provides comprehensive health status for all system components
+  // ===========================================================================
+  app.get('/api/admin/system-health', authenticateToken, requireRole(['admin', 'supervisor']), async (req: any, res) => {
+    try {
+      const { webshareProxyManager } = await import('./webshare-proxy');
+      const { getSMSQueueStats } = await import('./sms-worker');
+      
+      // 1. API Health
+      const apiHealth = {
+        status: 'healthy' as const,
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        version: '1.0.1',
+        environment: process.env.NODE_ENV || 'development',
+      };
+
+      // 2. Liveness check
+      const liveness = { status: 'alive' };
+
+      // 3. Readiness check (database)
+      let readiness = { status: 'ready', database: 'connected' };
+      let databaseInfo = { connected: true, messageCount: 0, userCount: 0 };
+      
+      try {
+        const pool = getDbPool();
+        await pool.query('SELECT 1');
+        
+        // Get message count
+        const msgResult = await pool.query('SELECT COUNT(*) as count FROM message_logs');
+        databaseInfo.messageCount = parseInt(msgResult.rows[0]?.count || '0');
+        
+        // Get user count
+        const userResult = await pool.query('SELECT COUNT(*) as count FROM users');
+        databaseInfo.userCount = parseInt(userResult.rows[0]?.count || '0');
+      } catch (dbError) {
+        readiness = { status: 'not_ready', database: 'disconnected' };
+        databaseInfo.connected = false;
+      }
+
+      // 4. Queue stats
+      let queueStats = null;
+      try {
+        queueStats = await getSMSQueueStats();
+      } catch (queueError) {
+        console.error('[SystemHealth] Queue stats error:', queueError);
+      }
+
+      // 5. Proxy status
+      let proxyStatus = null;
+      try {
+        const status = webshareProxyManager.getStatus();
+        proxyStatus = {
+          source: 'Webshare',
+          proxyCount: status.proxyCount,
+          lastFetched: status.lastFetch ? new Date(status.lastFetch).toISOString() : null,
+          proxies: status.proxies.map(p => ({
+            ip: p.address,
+            port: p.port,
+            city: p.city,
+            country: p.country,
+            isActive: p.isActive,
+          })),
+        };
+      } catch (proxyError) {
+        console.error('[SystemHealth] Proxy status error:', proxyError);
+      }
+
+      // 6. TextBelt quota
+      let textbeltQuota = null;
+      try {
+        const textbeltApiKey = process.env.TEXTBELT_API_KEY;
+        if (textbeltApiKey) {
+          const response = await fetch(`https://textbelt.com/quota/${textbeltApiKey}`);
+          const data = await response.json();
+          textbeltQuota = data.quotaRemaining || 0;
+        }
+      } catch (quotaError) {
+        console.error('[SystemHealth] TextBelt quota error:', quotaError);
+      }
+
+      res.json({
+        api: apiHealth,
+        liveness,
+        readiness,
+        queue: queueStats ? { success: true, stats: queueStats } : { success: false, stats: null },
+        proxy: proxyStatus,
+        database: databaseInfo,
+        textbeltQuota,
+      });
+    } catch (error: any) {
+      console.error('[SystemHealth] Error:', error);
+      res.status(500).json({
+        error: 'Failed to gather system health',
+        message: error.message,
+      });
+    }
+  });
+
+  // Test SMS endpoint - validates API key without using quota
+  // Appends "_test" to the TextBelt API key as per TextBelt docs
+  app.post('/api/admin/sms/test', authenticateToken, requireRole(['admin', 'supervisor']), async (req: any, res) => {
+    try {
+      const { phone, message } = req.body;
+      
+      if (!phone) {
+        return res.status(400).json({ success: false, error: 'Phone number is required' });
+      }
+      
+      // Get the TextBelt API key
+      const textbeltApiKey = await storage.getSystemConfig('textbelt_api_key');
+      if (!textbeltApiKey?.value) {
+        return res.status(400).json({ success: false, error: 'TextBelt API key not configured' });
+      }
+      
+      const normalizedPhone = normalizePhone(String(phone), '+1');
+      if (!normalizedPhone) {
+        return res.status(400).json({ success: false, error: 'Invalid phone number format' });
+      }
+      
+      // Append "_test" to the API key for test mode (no quota used)
+      const testApiKey = textbeltApiKey.value + '_test';
+      
+      const params = new URLSearchParams({
+        phone: normalizedPhone,
+        key: testApiKey,
+        message: message || 'Test message from Ibiki SMS',
+      });
+      
+      console.log('[Test SMS] Testing with key:', testApiKey.substring(0, 10) + '..._test');
+      
+      const response = await axios.post('https://textbelt.com/text', params, {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      });
+      
+      const data = response.data;
+      console.log('[Test SMS] Response:', JSON.stringify(data));
+      
+      // TextBelt test response: { success: true, quotaRemaining: 198, textId: null }
+      res.json({
+        success: data.success,
+        testMode: true,
+        quotaRemaining: data.quotaRemaining,
+        message: data.success 
+          ? 'SMS would be sent successfully (test mode - no quota used)' 
+          : 'SMS would fail: ' + (data.error || 'Unknown error'),
+        response: data,
+      });
+    } catch (error: any) {
+      console.error('[Test SMS] Error:', error.response?.data || error.message);
+      res.status(500).json({
+        success: false,
+        error: error.response?.data?.error || error.message,
+      });
+    }
+  });
+
+  // Webhook Public URL Configuration - allows changing the domain used for TextBelt reply webhooks
+  // This is useful if you need to switch domains (e.g., if banned from TextBelt)
+  app.get('/api/admin/webhook-url', authenticateToken, requireRole(['admin']), async (req: any, res) => {
+    try {
+      const dbConfig = await storage.getSystemConfig('webhook_public_url');
+      const envUrl = process.env.SERVER_PUBLIC_URL || 'https://ibiki.run.place';
+      res.json({
+        success: true,
+        currentUrl: dbConfig?.value || envUrl,
+        source: dbConfig?.value ? 'database' : 'environment',
+        envDefault: envUrl,
+        webhookEndpoint: `${dbConfig?.value || envUrl}/api/webhook/textbelt`,
+      });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.post('/api/admin/webhook-url', authenticateToken, requireRole(['admin']), async (req: any, res) => {
+    try {
+      const { url } = req.body;
+      
+      if (!url || typeof url !== 'string') {
+        return res.status(400).json({ success: false, error: 'URL is required' });
+      }
+      
+      // Validate URL format
+      let cleanUrl = url.trim();
+      if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) {
+        cleanUrl = 'https://' + cleanUrl;
+      }
+      // Remove trailing slash
+      cleanUrl = cleanUrl.replace(/\/+$/, '');
+      
+      try {
+        new URL(cleanUrl);
+      } catch {
+        return res.status(400).json({ success: false, error: 'Invalid URL format' });
+      }
+      
+      await storage.setSystemConfig('webhook_public_url', cleanUrl);
+      
+      console.log('[Webhook URL] Updated to:', cleanUrl, 'by user:', req.user.userId);
+      
+      res.json({
+        success: true,
+        message: 'Webhook URL updated successfully',
+        newUrl: cleanUrl,
+        webhookEndpoint: `${cleanUrl}/api/webhook/textbelt`,
+      });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Webhook Proxy Domains (Multiple) - for rotation to avoid bans
+  app.get('/api/admin/webhook-proxy-domains', authenticateToken, requireRole(['admin']), async (req: any, res) => {
+    try {
+      const dbConfig = await storage.getSystemConfig('webhook_proxy_domains');
+      const domains = dbConfig?.value ? dbConfig.value.split(',').map(d => d.trim()).filter(d => d.length > 0) : [];
+      
+      res.json({
+        success: true,
+        domains,
+        count: domains.length,
+        rotation: domains.length > 1 ? 'enabled' : 'disabled',
+      });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.post('/api/admin/webhook-proxy-domains', authenticateToken, requireRole(['admin']), async (req: any, res) => {
+    try {
+      const { domains } = req.body;
+      
+      if (!domains || !Array.isArray(domains)) {
+        return res.status(400).json({ success: false, error: 'Domains array is required' });
+      }
+      
+      // Validate and clean each domain
+      const cleanDomains: string[] = [];
+      for (const domain of domains) {
+        if (!domain || typeof domain !== 'string') continue;
+        
+        let cleanUrl = domain.trim();
+        if (!cleanUrl) continue;
+        
+        if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) {
+          cleanUrl = 'https://' + cleanUrl;
+        }
+        cleanUrl = cleanUrl.replace(/\/+$/, '');
+        
+        try {
+          new URL(cleanUrl);
+          cleanDomains.push(cleanUrl);
+        } catch {
+          console.warn('[Webhook Proxy] Invalid URL skipped:', domain);
+        }
+      }
+      
+      if (cleanDomains.length === 0) {
+        return res.status(400).json({ success: false, error: 'At least one valid domain is required' });
+      }
+      
+      // Store as comma-separated string
+      const domainsStr = cleanDomains.join(',');
+      await storage.setSystemConfig('webhook_proxy_domains', domainsStr);
+      
+      console.log('[Webhook Proxy] Updated domains (count:', cleanDomains.length, ') by user:', req.user.userId);
+      
+      res.json({
+        success: true,
+        message: 'Webhook proxy domains updated successfully',
+        domains: cleanDomains,
+        count: cleanDomains.length,
+        rotation: cleanDomains.length > 1 ? 'enabled' : 'disabled',
+      });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
     }
   });
 
@@ -1956,9 +2611,22 @@ app.get('/api/admin/diagnostics/run', authenticateToken, requireRole(['admin','s
       // Safe defaults if profile is somehow still missing
       const safeProfile = profile || {
         credits: "0.00",
+        creditsTextbelt: "0.00",
+        creditsExtremesms: "0.00",
         currency: "USD",
         businessName: null
       };
+
+      // Get active vendor to determine which credits to show
+      const activeVendor = vendorService.getActiveVendor();
+      let displayCredits = safeProfile.credits || "0.00";
+      
+      // Use vendor-specific credits based on active vendor
+      if (activeVendor.id === 'textbelt') {
+        displayCredits = (safeProfile as any).creditsTextbelt || safeProfile.credits || "0.00";
+      } else if (activeVendor.id === 'extremesms') {
+        displayCredits = (safeProfile as any).creditsExtremesms || safeProfile.credits || "0.00";
+      }
 
       res.json({
         success: true,
@@ -1969,7 +2637,10 @@ app.get('/api/admin/diagnostics/run', authenticateToken, requireRole(['admin','s
           company: user.company,
           role: user.role
         },
-        credits: safeProfile.credits || "0.00",
+        credits: displayCredits,
+        creditsTextbelt: (safeProfile as any).creditsTextbelt || "0.00",
+        creditsExtremesms: (safeProfile as any).creditsExtremesms || "0.00",
+        activeVendor: activeVendor.id,
         currency: safeProfile.currency || "USD",
         businessName: safeProfile.businessName || null,
         ratePerSms: clientRate,
@@ -2309,11 +2980,12 @@ app.get('/api/admin/diagnostics/run', authenticateToken, requireRole(['admin','s
     }
   });
 
-  // Admin/Supervisor: Get message logs for a specific client
+  // Admin/Supervisor: Get message logs for a specific client (admins may omit userId to fetch recent global logs)
   app.get("/api/admin/messages", authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
     try {
       const { userId, cursor } = req.query as { userId?: string; cursor?: string };
-      if (!userId) return res.status(400).json({ error: "userId is required" });
+      // Allow admins to omit userId to fetch recent global logs. Supervisors must supply userId.
+      if (!userId && req.user.role !== 'admin') return res.status(400).json({ error: "userId is required" });
       const relaxed = String(process.env.SUPERVISOR_RELAXED || 'true') !== 'false';
       if (req.user.role === 'supervisor' && !relaxed) {
         const sup = await storage.getClientProfileByUserId(req.user.userId);
@@ -2322,21 +2994,35 @@ app.get('/api/admin/diagnostics/run', authenticateToken, requireRole(['admin','s
           return res.status(403).json({ error: 'Unauthorized: client not in your group' });
         }
       }
-      const limit = await resolveFetchLimit(String(userId), 'client', req.query.limit as string | undefined);
+      const limit = await resolveFetchLimit(String(userId || ''), 'client', req.query.limit as string | undefined);
       let logs: any[] = [];
       if (cursor) {
         const pool = getDbPool();
         if (!pool) throw new Error('Database not connected');
         const t0 = Date.now();
-        const r = await pool.query(
-          `SELECT * FROM message_logs WHERE user_id=$1 AND created_at < $2 ORDER BY created_at DESC LIMIT $3`,
-          [String(userId), new Date(String(cursor)), limit]
-        );
-        const dur = Date.now() - t0;
-        try { res.set('Server-Timing', `db;dur=${dur}`); } catch {}
-        logs = r.rows;
+        if (userId) {
+          const r = await pool.query(
+            `SELECT * FROM message_logs WHERE user_id=$1 AND created_at < $2 ORDER BY created_at DESC LIMIT $3`,
+            [String(userId), new Date(String(cursor)), limit]
+          );
+          const dur = Date.now() - t0;
+          try { res.set('Server-Timing', `db;dur=${dur}`); } catch {}
+          logs = r.rows;
+        } else {
+          const r = await pool.query(
+            `SELECT * FROM message_logs WHERE created_at < $1 ORDER BY created_at DESC LIMIT $2`,
+            [new Date(String(cursor)), limit]
+          );
+          const dur = Date.now() - t0;
+          try { res.set('Server-Timing', `db;dur=${dur}`); } catch {}
+          logs = r.rows;
+        }
       } else {
-        logs = await storage.getMessageLogsByUserId(String(userId), limit) as any[];
+        if (userId) {
+          logs = await storage.getMessageLogsByUserId(String(userId), limit) as any[];
+        } else {
+          logs = await storage.getAllMessageLogs(limit) as any[];
+        }
       }
       try { res.set('Cache-Control','no-store'); } catch {}
       const nextCursor = logs.length > 0 ? logs[logs.length - 1].created_at || logs[logs.length - 1].createdAt || null : null;
@@ -2717,9 +3403,11 @@ app.get("/api/admin/recent-activity", authenticateToken, requireRole(['admin','s
             // Safe checks for potentially missing DB columns or null profile
             let creditsTextbelt = "0.00";
             let creditsExtremesms = "0.00";
+            let creditsGeneric = "0.00";
             try {
                creditsTextbelt = (profile as any)?.creditsTextbelt || "0.00";
                creditsExtremesms = (profile as any)?.creditsExtremesms || "0.00";
+               creditsGeneric = profile?.credits || "0.00";
             } catch {}
 
             // Determine active vendor credits
@@ -2728,6 +3416,9 @@ app.get("/api/admin/recent-activity", authenticateToken, requireRole(['admin','s
               activeVendorCredits = creditsTextbelt;
             } else if (activeVendor.id === 'extremesms') {
               activeVendorCredits = creditsExtremesms;
+            } else {
+              // For other vendors (anveo, etc), use the generic credits field
+              activeVendorCredits = creditsGeneric;
             }
 
             const lastPwd = await (storage as any).getLastActionForTarget?.(user.id, 'set_password');
@@ -2869,7 +3560,7 @@ app.get("/api/admin/recent-activity", authenticateToken, requireRole(['admin','s
   });
 
   // Admin action logs (all groups)
-  app.get('/api/admin/action-logs', authenticateToken, requireAdmin, async (req: any, res) => {
+  app.get('/api/admin/action-logs', authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
     try {
       const limit = Math.min(parseInt(String(req.query.limit || '500')), 5000);
       const type = String(req.query.type || 'all');
@@ -3400,15 +4091,26 @@ app.post("/api/admin/users/:userId/revoke-keys", authenticateToken, requireRole(
   });
 
   // Get system configuration
-app.get("/api/admin/config", authenticateToken, requireRole(['admin','supervisor']), async (req, res) => {
+app.get("/api/admin/config", authenticateToken, async (req: any, res) => {
     try {
         const configs = await storage.getAllSystemConfig();
         const configMap: Record<string, string> = {};
+        // Keys visible to all authenticated users (for DashboardHeader, etc)
+        const allowedForAll = new Set([
+          'routes_override_allow_single', 'timezone'
+        ]);
+        // Additional keys visible to supervisors
         const allowedForSupervisor = new Set([
-          'client_rate_per_sms','timezone','default_admin_messages_limit','default_client_messages_limit','routes_override_allow_single'
+          'client_rate_per_sms', 'default_admin_messages_limit', 'default_client_messages_limit'
         ]);
         configs.forEach(config => {
-          if (req.user.role === 'admin' || allowedForSupervisor.has(config.key)) {
+          if (req.user.role === 'admin') {
+            // Admin gets everything
+            configMap[config.key] = config.value;
+          } else if (req.user.role === 'supervisor' && (allowedForAll.has(config.key) || allowedForSupervisor.has(config.key))) {
+            configMap[config.key] = config.value;
+          } else if (allowedForAll.has(config.key)) {
+            // Regular users get only basic config
             configMap[config.key] = config.value;
           }
         });
@@ -3458,6 +4160,346 @@ app.get("/api/admin/config", authenticateToken, requireRole(['admin','supervisor
     }
   });
 
+  // Crypto wallet configuration (Admin only)
+  app.get("/api/admin/crypto-wallets", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const btc = await storage.getSystemConfig("crypto_wallet_btc");
+      const eth = await storage.getSystemConfig("crypto_wallet_eth");
+      const usdt = await storage.getSystemConfig("crypto_wallet_usdt");
+      const usdt_erc20 = await storage.getSystemConfig("crypto_wallet_usdt_erc20");
+      const usdt_trc20 = await storage.getSystemConfig("crypto_wallet_usdt_trc20");
+      const usdt_bep20 = await storage.getSystemConfig("crypto_wallet_usdt_bep20");
+      const ltc = await storage.getSystemConfig("crypto_wallet_ltc");
+      
+      res.json({
+        btc: btc?.value || "",
+        eth: eth?.value || "",
+        usdt: usdt?.value || "",
+        usdt_erc20: usdt_erc20?.value || "",
+        usdt_trc20: usdt_trc20?.value || "",
+        usdt_bep20: usdt_bep20?.value || "",
+        ltc: ltc?.value || ""
+      });
+    } catch (error) {
+      console.error("Get crypto wallets error:", error);
+      res.status(500).json({ error: "Failed to retrieve crypto wallets" });
+    }
+  });
+
+  app.post("/api/admin/crypto-wallets", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const { btc, eth, usdt, usdt_erc20, usdt_trc20, usdt_bep20, ltc } = req.body;
+      
+      if (typeof btc === 'string') await storage.setSystemConfig("crypto_wallet_btc", btc);
+      if (typeof eth === 'string') await storage.setSystemConfig("crypto_wallet_eth", eth);
+      if (typeof usdt === 'string') await storage.setSystemConfig("crypto_wallet_usdt", usdt);
+      if (typeof usdt_erc20 === 'string') await storage.setSystemConfig("crypto_wallet_usdt_erc20", usdt_erc20);
+      if (typeof usdt_trc20 === 'string') await storage.setSystemConfig("crypto_wallet_usdt_trc20", usdt_trc20);
+      if (typeof usdt_bep20 === 'string') await storage.setSystemConfig("crypto_wallet_usdt_bep20", usdt_bep20);
+      if (typeof ltc === 'string') await storage.setSystemConfig("crypto_wallet_ltc", ltc);
+      
+      res.json({ success: true, message: "Crypto wallets updated" });
+    } catch (error) {
+      console.error("Update crypto wallets error:", error);
+      res.status(500).json({ error: "Failed to update crypto wallets" });
+    }
+  });
+
+  // Maintenance mode toggle (Admin only)
+  app.get("/api/admin/maintenance-mode", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const mode = await storage.getSystemConfig("maintenance_mode");
+      res.json({ enabled: mode?.value === 'true' });
+    } catch (error) {
+      console.error("Get maintenance mode error:", error);
+      res.status(500).json({ error: "Failed to retrieve maintenance mode" });
+    }
+  });
+
+  app.post("/api/admin/maintenance-mode", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const { enabled } = req.body;
+      await storage.setSystemConfig("maintenance_mode", enabled ? 'true' : 'false');
+      res.json({ success: true, enabled });
+    } catch (error) {
+      console.error("Update maintenance mode error:", error);
+      res.status(500).json({ error: "Failed to update maintenance mode" });
+    }
+  });
+
+  // Support email configuration (Admin only)
+  app.get("/api/admin/support-email", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const email = await storage.getSystemConfig("support_email");
+      res.json({ email: email?.value || "ibiki_dash@proton.me" });
+    } catch (error) {
+      console.error("Get support email error:", error);
+      res.status(500).json({ error: "Failed to retrieve support email" });
+    }
+  });
+
+  app.post("/api/admin/support-email", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const { email } = req.body;
+      if (typeof email === 'string' && email.trim()) {
+        await storage.setSystemConfig("support_email", email.trim());
+        res.json({ success: true, email: email.trim() });
+      } else {
+        res.status(400).json({ error: "Valid email is required" });
+      }
+    } catch (error) {
+      console.error("Update support email error:", error);
+      res.status(500).json({ error: "Failed to update support email" });
+    }
+  });
+
+  // Public support email (no auth required)
+  app.get("/api/support-email", async (req, res) => {
+    try {
+      const email = await storage.getSystemConfig("support_email");
+      res.json({ email: email?.value || "ibiki_dash@proton.me" });
+    } catch (error) {
+      console.error("Get support email error:", error);
+      res.status(500).json({ email: "ibiki_dash@proton.me" });
+    }
+  });
+
+  // Public maintenance mode status (no auth required)
+  app.get("/api/maintenance-mode", async (req, res) => {
+    try {
+      const mode = await storage.getSystemConfig("maintenance_mode");
+      res.json({ enabled: mode?.value === 'true' });
+    } catch (error) {
+      console.error("Get maintenance mode error:", error);
+      res.status(500).json({ enabled: false });
+    }
+  });
+
+  // Admin SQL executor for number pool management
+  app.post("/api/admin/exec-sql", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const { query } = req.body;
+      
+      if (!query || typeof query !== 'string') {
+        return res.status(400).json({ error: 'SQL query required' });
+      }
+
+      // Whitelist safe read-only queries and specific functions
+      const normalizedQuery = query.trim().toLowerCase();
+      const isSelect = normalizedQuery.startsWith('select');
+      const isResetFunction = normalizedQuery.includes('reset_daily_counters()');
+      
+      if (!isSelect && !isResetFunction) {
+        return res.status(403).json({ 
+          error: 'Only SELECT queries and reset_daily_counters() allowed' 
+        });
+      }
+
+      // Execute query using poolInstance
+      const pool = getDbPool();
+      if (!pool) {
+        return res.status(500).json({ error: 'Database not available' });
+      }
+      
+      const result = await pool.query(query);
+      const rows = result.rows || [];
+      
+      res.json({ 
+        success: true, 
+        rows,
+        rowCount: rows.length 
+      });
+    } catch (error: any) {
+      console.error('SQL execution error:', error);
+      res.status(500).json({ 
+        error: error.message || 'SQL execution failed' 
+      });
+    }
+  });
+
+  // Get all numbers in the pool
+  app.get("/api/admin/number-pool", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const pool = getDbPool();
+      if (!pool) {
+        return res.status(500).json({ error: 'Database not available' });
+      }
+
+      const result = await pool.query(`
+        SELECT 
+          id,
+          phone_number,
+          vendor_account_id,
+          api_key_id,
+          status,
+          daily_limit,
+          sent_today,
+          complaints,
+          worker_url,
+          warming_day,
+          last_used_at,
+          created_at
+        FROM anveo_numbers
+        ORDER BY phone_number
+      `);
+
+      res.json({ numbers: result.rows });
+    } catch (error: any) {
+      console.error('Get number pool error:', error);
+      
+      // If table doesn't exist, return mock data for development
+      if (error?.message?.includes('relation "anveo_numbers" does not exist')) {
+        console.warn('anveo_numbers table missing, returning mock data for development');
+        return res.json({ numbers: [{
+          id: 1,
+          phone_number: '+1234567890',
+          vendor_account_id: null,
+          api_key_id: null,
+          status: 'active',
+          daily_limit: 100,
+          sent_today: 0,
+          complaints: 0,
+          worker_url: 'https://sms-proxy-1.c0smicalch3mist.workers.dev/webhook',
+          warming_day: 1,
+          last_used_at: null,
+          created_at: new Date().toISOString()
+        }] });
+      }
+      
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Add a new number to the pool
+  app.post("/api/admin/number-pool", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const { phone_number, worker_url, status, daily_limit, api_key_id } = req.body;
+
+      if (!phone_number || !worker_url) {
+        return res.status(400).json({ error: 'phone_number and worker_url required' });
+      }
+
+      const pool = getDbPool();
+      if (!pool) {
+        return res.status(500).json({ error: 'Database not available' });
+      }
+
+      await pool.query(`
+        INSERT INTO anveo_numbers (
+          phone_number,
+          vendor_account_id,
+          api_key_id,
+          status,
+          daily_limit,
+          sent_today,
+          worker_url,
+          created_at
+        ) VALUES ($1, 1, $2, $3, $4, 0, $5, NOW())
+      `, [phone_number, api_key_id || null, status || 'warming', daily_limit || 100, worker_url]);
+
+      res.json({ success: true, message: 'Number added successfully' });
+    } catch (error: any) {
+      console.error('Add number error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Update a number in the pool
+  app.patch("/api/admin/number-pool/:id", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status, daily_limit, worker_url, api_key_id } = req.body;
+
+      const pool = getDbPool();
+      if (!pool) {
+        return res.status(500).json({ error: 'Database not available' });
+      }
+
+      const updates: string[] = [];
+      const values: any[] = [];
+      let valueIndex = 1;
+
+      if (status !== undefined) {
+        updates.push(`status = $${valueIndex++}`);
+        values.push(status);
+      }
+      if (daily_limit !== undefined) {
+        updates.push(`daily_limit = $${valueIndex++}`);
+        values.push(daily_limit);
+      }
+      if (worker_url !== undefined) {
+        updates.push(`worker_url = $${valueIndex++}`);
+        values.push(worker_url);
+      }
+      if (api_key_id !== undefined) {
+        updates.push(`api_key_id = $${valueIndex++}`);
+        values.push(api_key_id || null);
+      }
+
+      if (updates.length === 0) {
+        return res.status(400).json({ error: 'No updates provided' });
+      }
+
+      values.push(id);
+      await pool.query(
+        `UPDATE anveo_numbers SET ${updates.join(', ')} WHERE id = $${valueIndex}`,
+        values
+      );
+
+      res.json({ success: true, message: 'Number updated successfully' });
+    } catch (error: any) {
+      console.error('Update number error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Delete a number from the pool
+  app.delete("/api/admin/number-pool/:id", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const pool = getDbPool();
+      if (!pool) {
+        return res.status(500).json({ error: 'Database not available' });
+      }
+
+      await pool.query('DELETE FROM anveo_numbers WHERE id = $1', [id]);
+
+      res.json({ success: true, message: 'Number deleted successfully' });
+    } catch (error: any) {
+      console.error('Delete number error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Public crypto payment page (no auth required)
+  app.get("/api/crypto-payment-info", async (req, res) => {
+    try {
+      const btc = await storage.getSystemConfig("crypto_wallet_btc");
+      const eth = await storage.getSystemConfig("crypto_wallet_eth");
+      const usdt = await storage.getSystemConfig("crypto_wallet_usdt");
+      const usdt_erc20 = await storage.getSystemConfig("crypto_wallet_usdt_erc20");
+      const usdt_trc20 = await storage.getSystemConfig("crypto_wallet_usdt_trc20");
+      const usdt_bep20 = await storage.getSystemConfig("crypto_wallet_usdt_bep20");
+      const ltc = await storage.getSystemConfig("crypto_wallet_ltc");
+      
+      res.json({
+        wallets: {
+          btc: btc?.value || null,
+          eth: eth?.value || null,
+          usdt: usdt?.value || null,
+          usdt_erc20: usdt_erc20?.value || null,
+          usdt_trc20: usdt_trc20?.value || null,
+          usdt_bep20: usdt_bep20?.value || null,
+          ltc: ltc?.value || null
+        }
+      });
+    } catch (error) {
+      console.error("Get crypto payment info error:", error);
+      res.status(500).json({ error: "Failed to retrieve payment information" });
+    }
+  });
+
   // Set routes override (Admin and Supervisor)
   app.post('/api/admin/routes-override', authenticateToken, requireRole(['admin','supervisor']), async (req, res) => {
     try {
@@ -3466,6 +4508,7 @@ app.get("/api/admin/config", authenticateToken, requireRole(['admin','supervisor
       await storage.setSystemConfig('routes_override_allow_single', val);
       res.json({ success: true, value: val });
     } catch (e: any) {
+      console.error('Routes override error:', e);
       res.status(500).json({ error: e?.message || 'Failed to set route override' });
     }
   });
@@ -4144,6 +5187,71 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
   app.post('/api/webhook/textbelt', async (req, res) => {
     try {
       const p = req.body || {};
+      console.log('[TextBelt Webhook] Received POST webhook:', JSON.stringify(p).substring(0, 500));
+      console.log('[TextBelt Webhook] Headers:', JSON.stringify({
+        signature: req.headers['x-textbelt-signature'] ? 'present' : 'missing',
+        timestamp: req.headers['x-textbelt-timestamp'] || 'missing',
+        proxyDomain: req.headers['x-proxy-domain'] || 'direct'
+      }));
+      
+      // Verify TextBelt webhook signature for security (optional but recommended)
+      const signature = req.headers['x-textbelt-signature'] as string | undefined;
+      const webhookTimestamp = req.headers['x-textbelt-timestamp'] as string | undefined;
+      
+      // Only validate if we have BOTH signature AND timestamp (and they're not empty)
+      if (signature && signature.length > 0 && webhookTimestamp && webhookTimestamp.length > 0) {
+        // Verify timestamp is not too old (15 minutes)
+        const timestampSeconds = parseInt(webhookTimestamp, 10);
+        const currentSeconds = Math.floor(Date.now() / 1000);
+        const MAX_AGE_SECONDS = 15 * 60; // 15 minutes
+        
+        if (Math.abs(currentSeconds - timestampSeconds) > MAX_AGE_SECONDS) {
+          console.warn('[TextBelt Webhook] Timestamp too old, rejecting request');
+          return res.status(403).json({ success: false, error: 'Webhook timestamp expired' });
+        }
+        
+        // Get raw body for signature verification (Express stores it via verify callback)
+        const rawPayload = (req as any).rawBody ? (req as any).rawBody.toString('utf8') : JSON.stringify(req.body);
+        
+        // Try all active TextBelt API keys from pool for signature verification
+        // (different messages may have been sent with different keys)
+        const poolKeys = await storage.getActiveApiKeys('textbelt');
+        
+        // Also try legacy system_config key as fallback
+        const legacyKey = await storage.getSystemConfig('textbelt_api_key');
+        const allKeys: string[] = [];
+        for (const pk of poolKeys) {
+          if (pk.api_key && pk.api_key.length > 10) allKeys.push(pk.api_key);
+        }
+        if (legacyKey?.value && legacyKey.value.length > 10) allKeys.push(legacyKey.value);
+        
+        if (allKeys.length === 0) {
+          console.warn('[TextBelt Webhook] No API keys configured for signature verification, skipping');
+        } else {
+          let signatureValid = false;
+          
+          for (const apiKey of allKeys) {
+            const expectedSignature = crypto
+              .createHmac('sha256', apiKey)
+              .update(webhookTimestamp + rawPayload)
+              .digest('hex');
+            
+            try {
+              if (signature.length === expectedSignature.length &&
+                  crypto.timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(expectedSignature, 'hex'))) {
+                signatureValid = true;
+                console.log('[TextBelt Webhook] Signature verified with key ending:', apiKey.slice(-8));
+                break;
+              }
+            } catch {}
+          }
+          
+          if (!signatureValid) {
+            console.warn('[TextBelt Webhook] Invalid signature, tried', allKeys.length, 'keys');
+            return res.status(403).json({ success: false, error: 'Invalid webhook signature' });
+          }
+        }
+      }
       
       // TextBelt reply format: { textId, fromNumber, text, data? }
       // Also support legacy format for backwards compatibility
@@ -4162,13 +5270,27 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
         message = p.text || '';
         messageId = String(p.textId);
         
-        // Try to find original message to get the sender (client) info
-        const originalMessage = await storage.getMessageLogByMessageId(messageId);
+        // Try to find original message by vendorMessageId (TextBelt textId) to get the sender (client) info
+        const originalMessage = await storage.getMessageLogByVendorMessageId(messageId);
         if (originalMessage) {
           // The original message's userId is the client who sent it - route reply to them
           originalSenderId = originalMessage.userId;
-          receiver = originalMessage.sender || '';
-          console.log('[TextBelt Webhook] Found original message, routing to userId:', originalSenderId);
+          receiver = originalMessage.senderPhoneNumber || '';
+          console.log('[TextBelt Webhook] Found original message by vendorMessageId, routing to userId:', originalSenderId);
+          
+          // IMPORTANT: Check if this is an echo (TextBelt sending back the original message)
+          // This can happen with some carriers - the webhook text matches the outgoing message
+          const originalOutgoingText = originalMessage.message || '';
+          const incomingText = message.trim();
+          
+          // Check if the incoming message starts with the original message (echo detection)
+          if (incomingText && originalOutgoingText && 
+              (originalOutgoingText.startsWith(incomingText) || incomingText.startsWith(originalOutgoingText.substring(0, 50)))) {
+            console.warn('[TextBelt Webhook] ECHO DETECTED - incoming text matches original outgoing message, ignoring');
+            console.warn('[TextBelt Webhook] Original:', originalOutgoingText.substring(0, 100));
+            console.warn('[TextBelt Webhook] Incoming:', incomingText.substring(0, 100));
+            return res.json({ success: true, message: 'Echo message ignored' });
+          }
         }
         
         // Parse custom data if present (we can store userId or business in webhookData)
@@ -4425,8 +5547,109 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
     }
   });
 
+  // =============================================
+  // ANVEO WEBHOOK ENDPOINT
+  // Receives incoming SMS forwarded from Anveo via Cloudflare Worker
+  // Anveo sends: from, to (your Anveo number), message
+  // =============================================
+  app.post('/api/webhook/anveo', async (req, res) => {
+    try {
+      const p = req.body || {};
+      console.log('[Anveo Webhook] Received:', JSON.stringify(p).substring(0, 500));
+      console.log('[Anveo Webhook] Headers:', JSON.stringify({
+        proxyDomain: req.headers['x-proxy-domain'] || 'direct',
+        forwardedFor: req.headers['x-forwarded-for'] || 'none'
+      }));
+      
+      // Anveo format from our Cloudflare Worker: { from, to, message, timestamp }
+      const from = normalizePhone(String(p.from || ''), '+1');
+      const receiver = normalizePhone(String(p.to || ''), '+1'); // Your Anveo number
+      const message = String(p.message || '').trim();
+      const messageId = `anveo-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+      const timestamp = p.timestamp ? new Date(p.timestamp) : new Date();
+      
+      if (!from || !message) {
+        console.warn('[Anveo Webhook] Missing from or message');
+        return res.status(400).json({ success: false, error: 'Missing from or message' });
+      }
+      
+      console.log('[Anveo Webhook] Processing SMS from:', from, 'to:', receiver, 'message:', message.substring(0, 100));
+      
+      // Find the user who owns this Anveo number or last sent to this "from" number
+      let userId: string | undefined = undefined;
+      
+      // First, try to find by looking up who sent an SMS to this "from" number recently
+      // This means someone replied to an outbound message
+      userId = await storage.findClientByRecipient(from);
+      
+      // If not found, try to find by the receiver (Anveo number) if it's assigned to a specific user
+      if (!userId && receiver) {
+        const profile = await storage.getClientProfileByPhoneNumber(receiver);
+        userId = profile?.userId;
+      }
+      
+      // Fallback to admin default business
+      if (!userId) {
+        const fallbackBiz = await getAdminDefaultBusinessId();
+        const fallbackProfile = await storage.getClientProfileByBusinessName(fallbackBiz);
+        userId = fallbackProfile?.userId;
+      }
+      
+      console.log('[Anveo Webhook] Routing to userId:', userId || 'unassigned');
+      
+      // Store the incoming message
+      const created = await storage.createIncomingMessage({
+        userId,
+        from,
+        firstname: null,
+        lastname: null,
+        business: null,
+        message,
+        status: 'received',
+        matchedBlockWord: null,
+        receiver,
+        usedmodem: null,
+        port: null,
+        timestamp,
+        messageId,
+        vendor: 'anveo'
+      } as any);
+      
+      // Store webhook event metadata
+      await storage.setSystemConfig('last_webhook_event', JSON.stringify({ 
+        from, 
+        receiver, 
+        message, 
+        vendor: 'anveo',
+        timestamp: timestamp.toISOString()
+      }));
+      await storage.setSystemConfig('last_webhook_event_at', new Date().toISOString());
+      await storage.setSystemConfig('last_webhook_routed_user', created.userId || 'unassigned');
+      
+      // Auto-create contact if needed
+      if (created.userId) {
+        const existing = await storage.getClientContactsByUserId(created.userId);
+        if (!existing.find(c => c.phoneNumber === from)) {
+          const clientProfile = await storage.getClientProfileByUserId(created.userId);
+          await storage.createClientContact({
+            userId: created.userId,
+            phoneNumber: from,
+            firstname: null,
+            lastname: null,
+            business: clientProfile?.businessName || null,
+          });
+        }
+      }
+      
+      res.json({ success: true, routed: !!userId, userId, messageId });
+    } catch (error) {
+      console.error('[Anveo Webhook] Error:', error);
+      res.status(500).json({ success: false, error: 'Internal error' });
+    }
+  });
+
   // Client: initial send (omit modem/port)
-  app.post('/api/sms/send', authenticateToken, async (req: any, res) => {
+  app.post('/api/sms/send', authenticateToken, checkMaintenanceMode, async (req: any, res) => {
     try {
       if (!(await canSendSingle(req))) return res.status(403).json(closedMessage());
       const { recipient, message, defaultDial } = req.body || {};
@@ -4454,7 +5677,10 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
         'sent',
         smsMessage,
         result,
-        normalizedRecipient
+        normalizedRecipient,
+        undefined,  // recipients array
+        undefined,  // senderPhoneNumber
+        result.vendorMessageId  // vendorMessageId for webhook reply matching
       );
 
       const existing = await storage.getClientContactsByUserId(req.user.userId);
@@ -4502,7 +5728,9 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
   // Client: reply (normalize + deduct)
   app.post('/api/web/inbox/reply', authenticateToken, async (req: any, res) => {
     try {
-      const { to, message, userId, defaultDial } = req.body || {};
+      const { to, message, userId, defaultDial, adminDirect, supervisorDirect } = req.body || {};
+      const isAdmin = req.user.role === 'admin';
+      const isSupervisor = req.user.role === 'supervisor';
       const effectiveUserIdPre = req.user.role === 'admin' && userId ? userId : req.user.userId;
       const normalizedToPre = normalizePhone(String(to || ''), String(defaultDial || '+1'));
       if (!isRoutesOpenNow()) {
@@ -4534,28 +5762,43 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
       const usemodem = overrideModem || lastInbound?.usedmodem || null;
       const port = overridePort || lastInbound?.port || null;
 
-      const extremeApiKey = await storage.getSystemConfig('extreme_api_key');
-      if (!extremeApiKey?.value) return res.status(400).json({ error: 'ExtremeSMS API key not configured' });
+      // Apply compliance to message
+      const finalMessage = await applyComplianceToMessage(effectiveUserId, normalizedTo, message);
 
-      const payload: any = { recipient: normalizedTo, message };
-      if (usemodem) payload.usemodem = usemodem;
-      if (port) payload.port = port;
+      // Use vendorService (supports TextBelt, ExtremeSMS, etc.)
+      const smsMessage: SMSMessage = {
+        recipient: normalizedTo,
+        message: finalMessage
+      };
+      const result = await vendorService.sendSMS(smsMessage);
+      if (!result.success) {
+        return res.status(400).json({ error: result.error || 'Failed to send message' });
+      }
 
-      const response = await axios.post(`${EXTREMESMS_BASE_URL}/api/v2/sms/sendsingle`, payload, {
-        headers: { 'Authorization': `Bearer ${extremeApiKey.value}`, 'Content-Type': 'application/json' }
-      });
-
-      await deductCreditsAndLog(
-        effectiveUserId,
-        1,
-        'web-ui-reply',
-        response.data?.messageId || `reply-${Date.now()}`,
-        'sent',
-        payload,
-        response.data,
-        normalizedTo
-      );
-      res.json({ success: true });
+      // Admin direct mode: audit-only (no charge) - uses vendor balance directly
+      if (isAdmin && adminDirect === true) {
+        await createAdminAuditLog(req.user.userId, 'web-ui-reply', result.messageId || `reply-${Date.now()}`, 'sent', smsMessage, result, normalizedTo);
+      } else {
+        // For supervisor direct mode or regular users, deduct credits
+        let targetUserId = effectiveUserId;
+        if (isSupervisor && supervisorDirect === true) {
+          targetUserId = req.user.userId;
+        }
+        await deductCreditsAndLog(
+          targetUserId,
+          1,
+          'web-ui-reply',
+          result.messageId || `reply-${Date.now()}`,
+          'SENDING',
+          smsMessage,
+          result,
+          normalizedTo,
+          undefined,  // recipients array
+          undefined,  // senderPhoneNumber
+          result.vendorMessageId  // vendorMessageId for webhook reply matching
+        );
+      }
+      res.json({ success: true, messageId: result.messageId });
     } catch (error: any) {
       console.error('Reply send error:', error.response?.data || error.message);
       try {
@@ -4815,10 +6058,10 @@ app.post("/api/admin/adjust-credits", authenticateToken, requireRole(['admin','s
       }
       
       // Update credits on target client
+      // Always update the generic credits field, plus vendor-specific if vendor is provided
+      await storage.updateClientCredits(userId, newBalance);
       if (vendor) {
         await storage.updateClientVendorCredits(userId, vendor, newBalance);
-      } else {
-        await storage.updateClientCredits(userId, newBalance);
       }
 
   // Log the transaction for target client
@@ -5118,7 +6361,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
   // ============================================================================
   
   // Send single SMS - Rate limited per API key
-  app.post("/api/v2/sms/sendsingle", apiLimiter, authenticateApiKey, async (req: any, res) => {
+  app.post("/api/v2/sms/sendsingle", apiLimiter, authenticateApiKey, checkMaintenanceMode, async (req: any, res) => {
     try {
       const { recipient, message, defaultDial } = req.body;
 
@@ -5153,10 +6396,12 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
 
       // Use vendor service so active vendor (e.g., TextBelt) is respected
       const result = await vendorService.sendSMS(smsMessage);
+      // Vendor now always provides status (SENT, FAILED, DELIVERED, etc.)
+      const vendorStatus = (result as any).status || 'UNKNOWN';
       const responsePayload = {
         success: !!result.success,
         messageId: result.messageId,
-        status: result.success ? 'sent' : 'failed',
+        status: vendorStatus,
         vendor: result.vendor,
         vendorMessageId: result.vendorMessageId,
         error: result.error
@@ -5168,10 +6413,13 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
         1,
         "/api/v2/sms/sendsingle",
         String(result.messageId || `single_${Date.now()}`),
-        result.success ? 'sent' : 'failed',
+        vendorStatus,
         { recipient, normalizedRecipient, message },
         responsePayload,
-        normalizedRecipient
+        normalizedRecipient,
+        undefined,  // recipients array
+        undefined,  // senderPhoneNumber
+        result.vendorMessageId  // vendorMessageId for webhook reply matching
       );
 
       res.json(responsePayload);
@@ -5194,7 +6442,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
   });
 
   // Send bulk SMS (same content) - Rate limited per API key
-  app.post("/api/v2/sms/sendbulk", apiLimiter, authenticateApiKey, async (req: any, res) => {
+  app.post("/api/v2/sms/sendbulk", apiLimiter, authenticateApiKey, checkMaintenanceMode, async (req: any, res) => {
     try {
       const { recipients, content, defaultDial } = req.body;
 
@@ -5221,18 +6469,14 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
 
       const extremeApiKey = await getExtremeApiKey();
       
-      // Use vendor service for bulk SMS with compliance
-      const results = [];
-      for (const recipient of normalizedRecipients) {
-        // Apply compliance settings per recipient (opt-out only on first message to each)
+      // Use vendor service for bulk SMS with compliance (send concurrently)
+      const sendPromises = normalizedRecipients.map(async (recipient) => {
         const compliantMessage = await applyComplianceToMessage(req.user.userId, recipient, content);
-        const smsMessage: SMSMessage = {
-          recipient,
-          message: compliantMessage
-        };
-        const result = await vendorService.sendSMS(smsMessage);
-        results.push(result);
-      }
+        const smsMessage: SMSMessage = { recipient, message: compliantMessage };
+        return vendorService.sendSMS(smsMessage);
+      });
+      const settled = await Promise.allSettled(sendPromises);
+      const results = settled.map(s => s.status === 'fulfilled' ? (s as PromiseFulfilledResult<any>).value : { success: false, error: String((s as PromiseRejectedResult).reason) });
 
       const successful = results.filter(r => r.success);
       const failed = results.filter(r => !r.success);
@@ -5246,7 +6490,9 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
         { recipients, normalizedRecipients, invalid, content },
         { results, successful: successful.length, failed: failed.length },
         undefined,
-        normalizedRecipients
+        normalizedRecipients,
+        undefined,  // senderPhoneNumber
+        successful[0]?.vendorMessageId  // vendorMessageId for webhook reply matching
       );
 
       res.json({ success: true, results, successful: successful.length, failed: failed.length });
@@ -5269,7 +6515,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
   });
 
   // Send bulk SMS (different content) - Rate limited per API key
-  app.post("/api/v2/sms/sendbulkmulti", apiLimiter, authenticateApiKey, async (req: any, res) => {
+  app.post("/api/v2/sms/sendbulkmulti", apiLimiter, authenticateApiKey, checkMaintenanceMode, async (req: any, res) => {
     try {
       const messages = req.body;
 
@@ -5298,17 +6544,14 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
       if (transformed.length === 0) return res.status(400).json({ success: false, error: "No valid messages after normalization", code: "INVALID_MESSAGES" });
       
       // Use vendor service for multi SMS with compliance
-      const results = [];
-      for (const message of transformed) {
-        // Apply compliance settings per recipient
+      // Send messages concurrently
+      const sendPromises2 = transformed.map(async (message) => {
         const compliantMessage = await applyComplianceToMessage(req.user.userId, message.recipient, message.message);
-        const smsMessage: SMSMessage = {
-          recipient: message.recipient,
-          message: compliantMessage
-        };
-        const result = await vendorService.sendSMS(smsMessage);
-        results.push(result);
-      }
+        const smsMessage: SMSMessage = { recipient: message.recipient, message: compliantMessage };
+        return vendorService.sendSMS(smsMessage);
+      });
+      const settled2 = await Promise.allSettled(sendPromises2);
+      const results = settled2.map(s => s.status === 'fulfilled' ? (s as PromiseFulfilledResult<any>).value : { success: false, error: String((s as PromiseRejectedResult).reason) });
 
       const successful = results.filter(r => r.success);
       const failed = results.filter(r => !r.success);
@@ -5323,7 +6566,9 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
         transformed,
         { results, successful: successful.length, failed: failed.length },
         undefined,
-        recipients
+        recipients,
+        undefined,  // senderPhoneNumber
+        successful[0]?.vendorMessageId  // vendorMessageId for webhook reply matching
       );
 
       res.json({ success: true, results, successful: successful.length, failed: failed.length });
@@ -5392,40 +6637,52 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
       }
       
       // Check ownership (clients can only check their own messages, admins can check any)
-      if (req.user.role !== 'admin' && messageLog.userId !== req.user.userId) {
+      if (req.user.role !== 'admin' && req.user.role !== 'supervisor' && messageLog.userId !== req.user.userId) {
         return res.status(403).json({ 
           success: false, 
           error: "Access denied" 
         });
       }
       
-      // Fetch latest status from ExtremeSMS
-      const extremeApiKey = await getExtremeApiKey();
+      // Get active vendor to determine which API to use
+      const activeVendor = vendorService.getActiveVendor();
       
       try {
-        const response = await axios.get(
-          `${EXTREMESMS_BASE_URL}/api/v2/sms/status/${messageId}`,
-          {
-            headers: {
-              "Authorization": `Bearer ${extremeApiKey}`
+        let status: string;
+        
+        if (activeVendor.type === 'textbelt') {
+          // TextBelt status check: https://textbelt.com/status/{textId}
+          const textbeltResponse = await axios.get(`https://textbelt.com/status/${messageId}`);
+          status = textbeltResponse.data.status || 'UNKNOWN';
+          console.log(`[Status] TextBelt status for ${messageId}:`, textbeltResponse.data);
+        } else {
+          // ExtremeSMS status check
+          const extremeApiKey = await getExtremeApiKey();
+          const response = await axios.get(
+            `${EXTREMESMS_BASE_URL}/api/v2/sms/status/${messageId}`,
+            {
+              headers: {
+                "Authorization": `Bearer ${extremeApiKey}`
+              }
             }
-          }
-        );
+          );
+          status = response.data.status;
+        }
 
         // Update our database with the latest status
-        if (response.data.status && response.data.status !== messageLog.status) {
-          await storage.updateMessageStatus(messageLog.id, response.data.status);
+        if (status && status !== messageLog.status) {
+          await storage.updateMessageStatus(messageLog.id, status);
         }
 
         res.json({
           success: true,
-          messageId: response.data.messageId,
-          status: response.data.status,
-          statusDescription: response.data.statusDescription || response.data.status
+          messageId: messageId,
+          status: status,
+          statusDescription: status
         });
-      } catch (extremeError: any) {
-        // If ExtremeSMS fails, return our local status
-        console.error("ExtremeSMS status check failed, using local status:", extremeError.message);
+      } catch (vendorError: any) {
+        // If vendor API fails, return our local status
+        console.error("Vendor status check failed, using local status:", vendorError.message);
         res.json({
           success: true,
           messageId: messageLog.messageId,
@@ -6002,7 +7259,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
   });
 
   // Web UI SMS Sending (calls ExtremeSMS via existing proxy logic)
-  app.post("/api/web/sms/send-single", authenticateToken, async (req: any, res) => {
+  app.post("/api/web/sms/send-single", authenticateToken, checkMaintenanceMode, async (req: any, res) => {
     try {
       if (!(await canSendSingle(req))) return res.status(403).json(closedMessage());
       const { to, message, userId, defaultDial, adminDirect, supervisorDirect } = req.body;
@@ -6039,13 +7296,25 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
       const normalizedTo = normalizePhone(String(to), String(defaultDial || '+1'));
       if (!normalizedTo) return res.status(400).json({ error: "Invalid recipient number" });
       
+      // Cluster-safe deduplication check - prevent double sends within 30 seconds
+      // Uses Redis for cross-worker dedup in PM2 cluster mode
+      if (await isDuplicateSendAsync(targetUserId, normalizedTo, message)) {
+        return res.status(429).json({ 
+          success: false, 
+          error: "Duplicate request detected. Please wait before sending again.",
+          code: "DUPLICATE_SEND"
+        });
+      }
+      
       // Apply compliance settings (sender name and opt-out text)
       const compliantMessage = await applyComplianceToMessage(targetUserId, normalizedTo, message);
       
       // Use vendor service so active vendor (e.g., TextBelt) is respected
-      const smsMessage: SMSMessage = {
+      // Include userId in customData for TextBelt reply webhook routing
+      const smsMessage: SMSMessageEnhanced = {
         recipient: normalizedTo,
-        message: compliantMessage
+        message: compliantMessage,
+        customData: { userId: targetUserId }
       };
       const result = await vendorService.sendSMS(smsMessage);
       
@@ -6071,10 +7340,13 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
           1,
           'web-ui-single',
           result.messageId || 'unknown',
-          result.success ? 'sent' : 'failed',
+          (result.status || (result.success ? 'SENT' : 'FAILED')).toUpperCase(),
           { to, message, normalizedTo },
           responsePayload,
-          normalizedTo
+          normalizedTo,
+          undefined,  // recipients array
+          undefined,  // senderPhoneNumber
+          result.vendorMessageId  // vendorMessageId for webhook reply matching
         );
         if ((isAdmin || isSupervisor) && req.user.userId !== targetUserId) {
           await createAdminAuditLog(req.user.userId, 'web-ui-single', result.messageId || 'unknown', 'sent', { to, message, normalizedTo }, responsePayload, normalizedTo);
@@ -6107,7 +7379,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
     }
 
   });
-  app.post("/api/web/sms/send-bulk", authenticateToken, async (req: any, res) => {
+  app.post("/api/web/sms/send-bulk", authenticateToken, checkMaintenanceMode, async (req: any, res) => {
     try {
       if (!canSendBulk()) return res.status(403).json(closedMessage());
       const { recipients, message, userId, defaultDial, adminDirect, supervisorDirect } = req.body;
@@ -6151,11 +7423,18 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
       
       // For bulk with same message, apply compliance for each recipient individually
       // Use vendor service so active vendor (e.g., TextBelt) is respected
+      // TextBelt rate limit: 1-2 SMS per second, using 800ms delay for safety (1.25 SMS/sec)
       const results = [];
-      for (const recipient of normalizedRecipients) {
+      for (let i = 0; i < normalizedRecipients.length; i++) {
+        const recipient = normalizedRecipients[i];
+        // Add delay between sends (not before first one)
+        if (i > 0) {
+          await new Promise(resolve => setTimeout(resolve, 800));
+        }
         const compliantMessage = await applyComplianceToMessage(targetUserId, recipient, message);
         try {
-          const smsMessage: SMSMessage = { recipient, message: compliantMessage };
+          // Include userId in customData for TextBelt reply webhook routing
+          const smsMessage: SMSMessageEnhanced = { recipient, message: compliantMessage, customData: { userId: targetUserId } };
           const result = await vendorService.sendSMS(smsMessage);
           results.push({ recipient, success: result.success, messageId: result.messageId, vendor: result.vendor, data: result });
         } catch (e: any) {
@@ -6164,27 +7443,37 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
       }
       const successful = results.filter(r => r.success);
       const failed = results.filter(r => !r.success);
-      const responsePayload = { messageId: successful[0]?.messageId || 'bulk_' + Date.now(), results, successful: successful.length, failed: failed.length, vendor: successful[0]?.vendor };
+      const batchId = 'bulk_' + Date.now();
+      const responsePayload = { messageId: batchId, results, successful: successful.length, failed: failed.length, vendor: successful[0]?.vendor };
 
       if (isAdmin && adminDirect === true) {
-        await createAdminAuditLog(req.user.userId, 'web-ui-bulk', responsePayload.messageId || 'unknown', 'sent', { recipients, normalizedRecipients, invalid, message }, responsePayload, undefined, normalizedRecipients);
+        await createAdminAuditLog(req.user.userId, 'web-ui-bulk', batchId, 'SENDING', { recipients, normalizedRecipients, invalid, message }, responsePayload, undefined, normalizedRecipients);
       } else {
         if (isSupervisor && supervisorDirect === true) {
           targetUserId = req.user.userId;
         }
-        const { messageLog } = await deductCreditsAndLog(
-          targetUserId,
-          successful.length,
-          'web-ui-bulk',
-          responsePayload.messageId || 'unknown',
-          successful.length > 0 ? 'sent' : 'failed',
-          { recipients, normalizedRecipients, invalid, message },
-          responsePayload,
-          undefined,
-          normalizedRecipients
-        );
+        // Log EACH successful message individually with its own messageId
+        for (const r of successful) {
+          try {
+            await deductCreditsAndLog(
+              targetUserId,
+              1,
+              'web-ui-bulk',
+              r.messageId || `bulk_${Date.now()}_${r.recipient}`,
+              (r.data?.status || 'SENT').toUpperCase(),
+              { recipient: r.recipient, message },
+              { ...r, batchId },
+              r.recipient,
+              undefined,  // recipients array
+              undefined,  // senderPhoneNumber
+              r.data?.vendorMessageId || r.vendorMessageId  // vendorMessageId for webhook reply matching
+            );
+          } catch (e: any) {
+            console.error(`[Bulk] Failed to log message for ${r.recipient}:`, e?.message);
+          }
+        }
         if ((isAdmin || isSupervisor) && req.user.userId !== targetUserId) {
-          await createAdminAuditLog(req.user.userId, 'web-ui-bulk', responsePayload.messageId || 'unknown', 'sent', { recipients, normalizedRecipients, invalid, message }, responsePayload, undefined, normalizedRecipients);
+          await createAdminAuditLog(req.user.userId, 'web-ui-bulk', batchId, 'SENDING', { recipients, normalizedRecipients, invalid, message }, responsePayload, undefined, normalizedRecipients);
         }
       }
       res.json({ success: true, messageId: responsePayload.messageId, vendor: responsePayload.vendor, data: responsePayload });
@@ -6213,6 +7502,178 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
       }
       console.error("Web UI send bulk error:", error);
       res.status(500).json({ error: error.message || "Failed to send bulk SMS" });
+    }
+  });
+
+  // SSE-based bulk send with real-time progress updates
+  app.post("/api/web/sms/send-bulk-stream", authenticateToken, checkMaintenanceMode, async (req: any, res) => {
+    // Set SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const sendProgress = (data: any) => {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    try {
+      if (!canSendBulk()) {
+        sendProgress({ type: 'error', error: 'Routes Closed' });
+        return res.end();
+      }
+      
+      const { recipients, message, userId, defaultDial, adminDirect, supervisorDirect } = req.body;
+      
+      if (userId && !['admin','supervisor'].includes(req.user.role)) {
+        sendProgress({ type: 'error', error: 'Unauthorized' });
+        return res.end();
+      }
+      
+      if (!recipients || !Array.isArray(recipients) || recipients.length === 0 || !message) {
+        sendProgress({ type: 'error', error: 'Recipients array and message are required' });
+        return res.end();
+      }
+
+      if (recipients.length > 3000) {
+        sendProgress({ type: 'error', error: 'Maximum 3000 recipients allowed per bulk send' });
+        return res.end();
+      }
+
+      const isAdmin = req.user.role === 'admin';
+      const isSupervisor = req.user.role === 'supervisor';
+      let targetUserId = req.user.userId;
+      
+      if (isAdmin && adminDirect === true) {
+        targetUserId = req.user.userId;
+      } else if (isAdmin) {
+        if (!userId) {
+          sendProgress({ type: 'error', error: 'Client selection required for charging' });
+          return res.end();
+        }
+        targetUserId = userId;
+      } else if (isSupervisor && supervisorDirect === true) {
+        targetUserId = req.user.userId;
+      } else if (isSupervisor) {
+        if (!userId) {
+          sendProgress({ type: 'error', error: 'Client selection required for charging' });
+          return res.end();
+        }
+        const me = await storage.getUser(req.user.userId);
+        const target = await storage.getUser(userId);
+        if (((me as any)?.groupId || null) !== ((target as any)?.groupId || null)) {
+          sendProgress({ type: 'error', error: 'Unauthorized: client not in your group' });
+          return res.end();
+        }
+        targetUserId = userId;
+      }
+
+      const { ok: normalizedRecipients, invalid } = normalizeMany(recipients, String(defaultDial || '+1'));
+      if (normalizedRecipients.length === 0) {
+        sendProgress({ type: 'error', error: 'No valid recipients after normalization', invalid });
+        return res.end();
+      }
+      
+      const total = normalizedRecipients.length;
+      const delayMs = 600; // TextBelt rate limit: 1-2 SMS/sec
+      const estimatedTotalMs = total * delayMs;
+      
+      // Send initial progress
+      sendProgress({ 
+        type: 'start', 
+        total, 
+        estimatedTotalMs,
+        estimatedCompletionTime: new Date(Date.now() + estimatedTotalMs).toISOString()
+      });
+
+      const results: any[] = [];
+      const batchId = 'bulk_' + Date.now();
+      
+      for (let i = 0; i < normalizedRecipients.length; i++) {
+        const recipient = normalizedRecipients[i];
+        
+        // Add delay between sends (not before first one)
+        if (i > 0) {
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+        
+        const compliantMessage = await applyComplianceToMessage(targetUserId, recipient, message);
+        let result: any;
+        
+        try {
+          const smsMessage: SMSMessageEnhanced = { recipient, message: compliantMessage, customData: { userId: targetUserId } };
+          const sendResult = await vendorService.sendSMS(smsMessage);
+          result = { recipient, success: sendResult.success, messageId: sendResult.messageId, vendor: sendResult.vendor, data: sendResult };
+          
+          // Log and charge for successful sends
+          if (sendResult.success) {
+            try {
+              await deductCreditsAndLog(
+                targetUserId,
+                1,
+                'web-ui-bulk-stream',
+                sendResult.messageId || `bulk_${Date.now()}_${recipient}`,
+                (sendResult.status || 'SENT').toUpperCase(),
+                { recipient, message },
+                { ...result, batchId },
+                recipient,
+                undefined,  // recipients array
+                undefined,  // senderPhoneNumber
+                sendResult.vendorMessageId  // vendorMessageId for webhook reply matching
+              );
+            } catch (e: any) {
+              console.error(`[BulkStream] Failed to log message for ${recipient}:`, e?.message);
+            }
+          }
+        } catch (e: any) {
+          result = { recipient, success: false, error: e?.message || String(e) };
+        }
+        
+        results.push(result);
+        
+        // Calculate remaining time
+        const remaining = total - (i + 1);
+        const remainingMs = remaining * delayMs;
+        
+        // Send progress update
+        sendProgress({
+          type: 'progress',
+          current: i + 1,
+          total,
+          sent: results.filter(r => r.success).length,
+          failed: results.filter(r => !r.success).length,
+          remaining,
+          remainingMs,
+          estimatedCompletionTime: new Date(Date.now() + remainingMs).toISOString(),
+          lastResult: result
+        });
+      }
+
+      const successful = results.filter(r => r.success);
+      const failed = results.filter(r => !r.success);
+      
+      // Create admin audit log if needed
+      if (isAdmin && adminDirect === true) {
+        await createAdminAuditLog(req.user.userId, 'web-ui-bulk-stream', batchId, 'SENDING', { recipients, normalizedRecipients, invalid, message }, { results, successful: successful.length, failed: failed.length }, undefined, normalizedRecipients);
+      } else if ((isAdmin || isSupervisor) && req.user.userId !== targetUserId) {
+        await createAdminAuditLog(req.user.userId, 'web-ui-bulk-stream', batchId, 'SENDING', { recipients, normalizedRecipients, invalid, message }, { results, successful: successful.length, failed: failed.length }, undefined, normalizedRecipients);
+      }
+
+      // Send completion
+      sendProgress({
+        type: 'complete',
+        total,
+        sent: successful.length,
+        failed: failed.length,
+        batchId,
+        results
+      });
+      
+      res.end();
+    } catch (error: any) {
+      console.error("Web UI bulk stream error:", error);
+      sendProgress({ type: 'error', error: error.message || 'Failed to send bulk SMS' });
+      res.end();
     }
   });
 
@@ -6260,11 +7721,18 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
       
       // Apply compliance per recipient (different messages)
       // Use vendor service so active vendor (e.g., TextBelt) is respected
+      // TextBelt rate limit: 1-2 SMS per second, using 800ms delay for safety (1.25 SMS/sec)
       const results = [];
-      for (const msg of transformed) {
+      for (let i = 0; i < transformed.length; i++) {
+        const msg = transformed[i];
+        // Add delay between sends (not before first one)
+        if (i > 0) {
+          await new Promise(resolve => setTimeout(resolve, 800));
+        }
         const compliantMessage = await applyComplianceToMessage(targetUserId, msg.recipient, msg.message);
         try {
-          const smsMessage: SMSMessage = { recipient: msg.recipient, message: compliantMessage };
+          // Include userId in customData for TextBelt reply webhook routing
+          const smsMessage: SMSMessageEnhanced = { recipient: msg.recipient, message: compliantMessage, customData: { userId: targetUserId } };
           const result = await vendorService.sendSMS(smsMessage);
           results.push({ recipient: msg.recipient, success: result.success, messageId: result.messageId, vendor: result.vendor, data: result });
         } catch (e: any) {
@@ -6273,25 +7741,38 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
       }
       const successful = results.filter(r => r.success);
       const failed = results.filter(r => !r.success);
-      const responsePayload = { messageId: successful[0]?.messageId || 'multi_' + Date.now(), results, successful: successful.length, failed: failed.length, vendor: successful[0]?.vendor };
+      const batchId = 'multi_' + Date.now();
+      const responsePayload = { messageId: batchId, results, successful: successful.length, failed: failed.length, vendor: successful[0]?.vendor };
 
       if (isAdmin && adminDirect === true) {
-        await createAdminAuditLog(req.user.userId, 'web-ui-bulk-multi', responsePayload.messageId || 'unknown', 'sent', { messages }, responsePayload);
+        await createAdminAuditLog(req.user.userId, 'web-ui-bulk-multi', batchId, 'sent', { messages }, responsePayload);
       } else {
         if (isSupervisor && supervisorDirect === true) {
           targetUserId = req.user.userId;
         }
-        const { messageLog } = await deductCreditsAndLog(
-          targetUserId,
-          successful.length,
-          'web-ui-bulk-multi',
-          responsePayload.messageId || 'unknown',
-          successful.length > 0 ? 'sent' : 'failed',
-          { messages, transformed },
-          responsePayload
-        );
+        // Log EACH successful message individually with its own messageId
+        const originalMessages = new Map(transformed.map((m: any) => [m.recipient, m.message]));
+        for (const r of successful) {
+          try {
+            await deductCreditsAndLog(
+              targetUserId,
+              1,
+              'web-ui-bulk-multi',
+              r.messageId || `multi_${Date.now()}_${r.recipient}`,
+              (r.data?.status || 'SENT').toUpperCase(),
+              { recipient: r.recipient, message: originalMessages.get(r.recipient) },
+              { ...r, batchId },
+              r.recipient,
+              undefined,  // recipients array
+              undefined,  // senderPhoneNumber
+              r.data?.vendorMessageId || r.vendorMessageId  // vendorMessageId for webhook reply matching
+            );
+          } catch (e: any) {
+            console.error(`[BulkMulti] Failed to log message for ${r.recipient}:`, e?.message);
+          }
+        }
         if ((isAdmin || isSupervisor) && req.user.userId !== targetUserId) {
-          await createAdminAuditLog(req.user.userId, 'web-ui-bulk-multi', responsePayload.messageId || 'unknown', 'sent', { messages }, responsePayload);
+          await createAdminAuditLog(req.user.userId, 'web-ui-bulk-multi', batchId, 'sent', { messages }, responsePayload);
         }
       }
       res.json({ success: true, messageId: responsePayload.messageId, vendor: responsePayload.vendor, data: responsePayload });
@@ -6479,20 +7960,32 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
         }
       }
       const profile = await storage.getClientProfileByUserId(targetUserId);
-      let credits = profile?.credits ?? '0.00';
       const currency = profile?.currency ?? 'USD';
 
-      if (req.user.role === 'admin' && String(targetUserId) === String(req.user.userId)) {
-         try {
-           const vm = VendorManager.getInstance();
-           const activeVendorId = vm.getConfig().activeVendorId;
-           const vendorBal = await vm.getBalance(activeVendorId);
-           if (vendorBal !== null) {
-             credits = String(vendorBal);
-           }
-         } catch (e) {
-           console.error("Failed to fetch active vendor balance for admin:", e);
-         }
+      // Return vendor-specific credits based on active vendor to match client management display
+      let credits = '0.00';
+      try {
+        const { VendorManager } = await import('./vendor-manager');
+        const vendorManager = VendorManager.getInstance();
+        const config = vendorManager.getConfig();
+        const vendor = vendorManager.getVendor(config.activeVendorId);
+        const vendorType = vendor?.type || '';
+        
+        // Use vendor-specific credits field if available, fallback to generic
+        if (vendorType === 'textbelt' && profile?.creditsTextbelt) {
+          credits = profile.creditsTextbelt;
+        } else if (vendorType === 'extremesms' && profile?.creditsExtremesms) {
+          credits = profile.creditsExtremesms;
+        } else if (vendorType === 'anveo' && profile?.creditsAnveo) {
+          credits = profile.creditsAnveo;
+        } else {
+          credits = profile?.credits ?? '0.00';
+        }
+        console.log(`[Balance] ${req.user.role} ${req.user.email} vendor=${vendorType} credits: ${credits}`);
+      } catch (e) {
+        // Fallback to generic credits if vendor lookup fails
+        credits = profile?.credits ?? '0.00';
+        console.log(`[Balance] ${req.user.role} ${req.user.email} using profile credits: ${credits}`);
       }
 
       res.json({ success: true, balance: parseFloat(credits), currency });
@@ -6812,7 +8305,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
               regexp_replace(receiver, '[^0-9]', '', 'g') = $2 OR regexp_replace(receiver, '[^0-9]', '', 'g') = ('1' || $2) OR
               ('1' || regexp_replace(receiver, '[^0-9]', '', 'g')) = $2
            )
-        `,
+         )`,
         [targetUserId, digits]
       );
       try {
@@ -6828,13 +8321,79 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
             [digits]
           );
           res.json({ success: true, affected: result2.rowCount || 0, fallback: true });
-          await pool.end();
           return;
         }
       } catch {}
        res.json({ success: true, affected: result.rowCount || 0 });
     } catch (e: any) {
+      console.error('Delete conversation error:', e);
       res.status(500).json({ error: e?.message || 'Failed to delete conversation' });
+    }
+  });
+
+  app.post("/api/web/inbox/restore-conversation", authenticateToken, async (req: any, res) => {
+    try {
+      const { phoneNumber, userId } = req.body || {};
+      if (!phoneNumber) return res.status(400).json({ error: 'Phone number is required' });
+      if (userId && !['admin','supervisor'].includes(req.user.role)) {
+        return res.status(403).json({ error: 'Unauthorized' });
+      }
+      const targetUserId = ((req.user.role === 'admin' || req.user.role === 'supervisor') && userId) ? String(userId) : req.user.userId;
+      if (req.user.role === 'supervisor' && userId) {
+        const relaxed = String(process.env.SUPERVISOR_RELAXED || 'true') !== 'false';
+        if (!relaxed && String(userId) !== req.user.userId) {
+          const sup = await storage.getClientProfileByUserId(req.user.userId).catch(() => undefined);
+          const tgt = await storage.getClientProfileByUserId(String(userId)).catch(() => undefined);
+          if (!sup?.groupId || !tgt?.groupId || String(sup.groupId) !== String(tgt.groupId)) {
+            return res.status(403).json({ error: 'Unauthorized' });
+          }
+        }
+      }
+      const digits = String(phoneNumber).replace(/[^0-9]/g, '');
+      const pool = getDbPool();
+      if (!pool) throw new Error('Database not connected');
+      const result = await pool.query(
+        `UPDATE incoming_messages SET is_deleted = false
+         WHERE (
+           user_id = $1 AND (
+             regexp_replace("from", '[^0-9]', '', 'g') = $2 OR regexp_replace(receiver, '[^0-9]', '', 'g') = $2 OR
+             regexp_replace("from", '[^0-9]', '', 'g') = ('1' || $2) OR regexp_replace(receiver, '[^0-9]', '', 'g') = ('1' || $2) OR
+             ('1' || regexp_replace("from", '[^0-9]', '', 'g')) = $2 OR ('1' || regexp_replace(receiver, '[^0-9]', '', 'g')) = $2
+           )
+         )
+         OR (
+           user_id IS NULL AND EXISTS (
+             SELECT 1 FROM client_profiles cp WHERE cp.user_id = $1 AND (
+               $2 = ANY(cp.assigned_phone_numbers) OR LOWER(incoming_messages.business) = LOWER(cp.business_name)
+             )
+           ) AND (
+              regexp_replace("from", '[^0-9]', '', 'g') = $2 OR regexp_replace("from", '[^0-9]', '', 'g') = ('1' || $2) OR
+              ('1' || regexp_replace("from", '[^0-9]', '', 'g')) = $2 OR
+              regexp_replace(receiver, '[^0-9]', '', 'g') = $2 OR regexp_replace(receiver, '[^0-9]', '', 'g') = ('1' || $2) OR
+              ('1' || regexp_replace(receiver, '[^0-9]', '', 'g')) = $2
+           )
+         )`,
+        [targetUserId, digits]
+      );
+      try {
+        if ((result.rowCount || 0) === 0 && (req.user.role === 'admin' || req.user.role === 'supervisor')) {
+          const result2 = await pool.query(
+            `UPDATE incoming_messages SET is_deleted = false
+             WHERE (
+               regexp_replace("from", '[^0-9]', '', 'g') = $1 OR regexp_replace(receiver, '[^0-9]', '', 'g') = $1 OR
+               regexp_replace("from", '[^0-9]', '', 'g') = ('1' || $1) OR regexp_replace(receiver, '[^0-9]', '', 'g') = ('1' || $1) OR
+               ('1' || regexp_replace("from", '[^0-9]', '', 'g')) = $1 OR ('1' || regexp_replace(receiver, '[^0-9]', '', 'g')) = $1
+             )`,
+            [digits]
+          );
+          res.json({ success: true, affected: result2.rowCount || 0, fallback: true });
+          return;
+        }
+      } catch {}
+       res.json({ success: true, affected: result.rowCount || 0 });
+    } catch (e: any) {
+      console.error('Restore conversation error:', e);
+      res.status(500).json({ error: e?.message || 'Failed to restore conversation' });
     }
   });
 
@@ -7114,27 +8673,38 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
     try {
       const vm = VendorManager.getInstance();
       const config = vm.getConfig();
-      const vendorService = VendorService.getInstance();
+      const vendorSvc = new VendorService();
       
       const vendors = await Promise.all(config.vendors.map(async (v) => {
         // Get actual health and quota from vendor service
         let health = { healthy: false, reason: 'Unknown' };
         let quota = 0;
         try {
-          const healthCheck = await vendorService.checkVendorHealth(v);
+          const healthCheck = await vendorSvc.checkVendorHealth(v);
           health = { healthy: healthCheck.healthy, reason: healthCheck.reason };
           quota = healthCheck.quota || 0;
         } catch (e: any) {
           health = { healthy: false, reason: e?.message || 'Health check failed' };
         }
         
+        const descriptions: Record<string, string> = {
+          textbelt: 'Free SMS service with limited features',
+          extremesms: 'Premium SMS service with global coverage',
+          anveo: 'Low-cost US SMS ($0.01/msg) with 2-way messaging',
+          twilio: 'Enterprise SMS platform with global coverage',
+          vonage: 'Cloud communications API platform',
+          custom: 'Custom SMS provider integration'
+        };
+        
         return {
           id: v.id,
           name: v.name,
-          description: v.type === 'textbelt' ? 'Free SMS service with limited features' : 'Premium SMS service with global coverage',
+          type: v.type,
+          description: descriptions[v.type] || 'SMS provider',
           isActive: config.activeVendorId === v.id,
           health,
-          quota
+          quota,
+          config: v.config
         };
       }));
 
@@ -7218,6 +8788,447 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
     } catch (error: any) {
       console.error("SMS vendor config update error:", error);
       res.status(500).json({ success: false, error: error.message || "Failed to update vendor config" });
+    }
+  });
+
+  // Get active vendor balance for admin dashboard
+  app.get("/api/admin/vendor-balance", authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
+    try {
+      const vm = VendorManager.getInstance();
+      const balanceInfo = await vm.getActiveVendorBalance();
+      const activeVendor = vm.getActiveVendor();
+      
+      res.json({
+        success: balanceInfo.success,
+        balance: balanceInfo.balance,
+        vendor: balanceInfo.vendor,
+        vendorName: activeVendor.name
+      });
+    } catch (error: any) {
+      console.error("Vendor balance fetch error:", error);
+      res.status(500).json({ success: false, error: error.message || "Failed to fetch vendor balance" });
+    }
+  });
+
+  // ============================================
+  // API KEY POOL MANAGEMENT (High-Volume SMS)
+  // ============================================
+
+  // Helper to convert snake_case DB rows to camelCase
+  function snakeToCamel(row: any): any {
+    if (!row) return row;
+    const result: any = {};
+    for (const key of Object.keys(row)) {
+      const camelKey = key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+      result[camelKey] = row[key];
+    }
+    return result;
+  }
+
+  // Get all API keys in pool
+  app.get("/api/admin/api-key-pool", authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
+    try {
+      const vendor = req.query.vendor as string || undefined;
+      let keys = await storage.getAllApiKeysInPool(vendor);
+      
+      // Convert snake_case to camelCase
+      keys = keys.map(snakeToCamel);
+      
+      // Auto-populate with existing TextBelt API key if pool is empty
+      if (keys.length === 0) {
+        const textbeltKey = process.env.TEXTBELT_API_KEY;
+        if (textbeltKey && textbeltKey !== 'textbelt') {
+          // Check quota for the existing key
+          let quota = 0;
+          try {
+            const quotaResp = await axios.get(`https://textbelt.com/quota/${textbeltKey}`);
+            quota = quotaResp.data?.quotaRemaining || 0;
+          } catch (e) {
+            console.log('Could not fetch quota for auto-added key');
+          }
+          
+          // Add the existing key to the pool
+          const newKey = await storage.addApiKeyToPool({
+            vendor: 'textbelt',
+            name: 'Primary TextBelt Key',
+            apiKey: textbeltKey,
+            isActive: true,
+            priority: 0,
+            weight: 100,
+            quotaLimit: quota,
+            quotaUsed: 0,
+            rateLimit: '2.00',
+          });
+          
+          keys = [snakeToCamel(newKey)];
+          console.log('✅ Auto-added existing TextBelt API key to pool with quota:', quota);
+        }
+      }
+      
+      // Calculate route window status
+      const routeOpen = isRoutesOpenNow();
+      const pst = getHourInZone('America/Los_Angeles');
+      const est = getHourInZone('America/New_York');
+      
+      // Calculate throughput capacity
+      const activeKeys = keys.filter((k: any) => k.isActive);
+      const totalRateLimit = activeKeys.reduce((sum: number, k: any) => sum + Number(k.rateLimit || 2), 0);
+      
+      res.json({
+        success: true,
+        keys: keys.map((k: any) => ({
+          ...k,
+          // Return full API key for admin management
+          apiKey: k.apiKey || null
+        })),
+        summary: {
+          total: keys.length,
+          active: activeKeys.length,
+          inactive: keys.length - activeKeys.length,
+          totalRateLimitPerSec: totalRateLimit,
+          estimatedDailyCapacity: totalRateLimit * 3600 * 10, // 10 hour window
+          routeWindow: {
+            isOpen: routeOpen,
+            currentPST: `${pst.hour}:${pst.minute.toString().padStart(2, '0')}`,
+            currentEST: `${est.hour}:${est.minute.toString().padStart(2, '0')}`,
+            opensAt: '08:00 PST',
+            closesAt: '21:00 EST'
+          }
+        }
+      });
+    } catch (error: any) {
+      console.error("API key pool fetch error:", error);
+      res.status(500).json({ success: false, error: error.message || "Failed to fetch API keys" });
+    }
+  });
+
+  // Add new API key to pool
+  app.post("/api/admin/api-key-pool", authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
+    try {
+      const { vendor, name, apiKey, fromNumber, priority, weight, quotaLimit, rateLimit } = req.body;
+      
+      if (!vendor || !name || !apiKey) {
+        return res.status(400).json({ success: false, error: "vendor, name, and apiKey are required" });
+      }
+      
+      // For Anveo, fromNumber is required
+      if (vendor === 'anveo' && !fromNumber) {
+        return res.status(400).json({ success: false, error: "fromNumber is required for Anveo" });
+      }
+      
+      // Fetch quota from vendor before adding
+      let fetchedQuota = quotaLimit || 0;
+      if (vendor === 'textbelt') {
+        try {
+          const quotaResp = await axios.get(`https://textbelt.com/quota/${apiKey}`);
+          if (quotaResp.data?.quotaRemaining !== undefined) {
+            fetchedQuota = quotaResp.data.quotaRemaining;
+          }
+        } catch (e) {
+          console.log('Could not fetch quota for new key, using provided value');
+        }
+      }
+      
+      const newKey = await storage.addApiKeyToPool({
+        vendor,
+        name,
+        apiKey,
+        fromNumber: fromNumber || null,
+        isActive: true,
+        priority: priority || 0,
+        weight: weight || 100,
+        quotaLimit: fetchedQuota,
+        quotaUsed: 0,
+        rateLimit: rateLimit || 2.0,
+        consecutiveErrors: 0,
+        totalSent: 0,
+        totalFailed: 0
+      });
+      
+      const camelKey = snakeToCamel(newKey);
+      
+      res.json({
+        success: true,
+        key: {
+          ...camelKey,
+          apiKey: '****' + camelKey.apiKey.slice(-4)
+        },
+        quotaRemaining: fetchedQuota,
+        message: `API key "${name}" added to pool with ${fetchedQuota} credits`
+      });
+    } catch (error: any) {
+      console.error("API key pool add error:", error);
+      res.status(500).json({ success: false, error: error.message || "Failed to add API key" });
+    }
+  });
+
+  // Update API key in pool
+  app.put("/api/admin/api-key-pool/:id", authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const updates = req.body;
+      
+      // Don't allow updating apiKey through this endpoint for security
+      delete updates.apiKey;
+      delete updates.id;
+      
+      const updated = await storage.updateApiKeyInPool(id, updates);
+      
+      if (!updated) {
+        return res.status(404).json({ success: false, error: "API key not found" });
+      }
+      
+      res.json({
+        success: true,
+        key: {
+          ...updated,
+          apiKey: updated.apiKey ? '****' + updated.apiKey.slice(-4) : null
+        },
+        message: "API key updated"
+      });
+    } catch (error: any) {
+      console.error("API key pool update error:", error);
+      res.status(500).json({ success: false, error: error.message || "Failed to update API key" });
+    }
+  });
+
+  // Delete API key from pool
+  app.delete("/api/admin/api-key-pool/:id", authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const success = await storage.removeApiKeyFromPool(id);
+      
+      if (!success) {
+        return res.status(404).json({ success: false, error: "API key not found" });
+      }
+      
+      res.json({ success: true, message: "API key removed from pool" });
+    } catch (error: any) {
+      console.error("API key pool delete error:", error);
+      res.status(500).json({ success: false, error: error.message || "Failed to delete API key" });
+    }
+  });
+
+  // Test API key
+  app.post("/api/admin/api-key-pool/:id/test", authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const keys = await storage.getAllApiKeysInPool();
+      const key = keys.find(k => k.id === id);
+      
+      if (!key) {
+        return res.status(404).json({ success: false, error: "API key not found" });
+      }
+      
+      // Test the key by checking quota
+      if (key.vendor === 'textbelt') {
+        const response = await axios.get(`https://textbelt.com/quota/${key.api_key || key.apiKey}`);
+        const quota = response.data.quotaRemaining ?? 0;
+        
+        // Update the quota in the database
+        await storage.updateApiKeyInPool(id, { quotaLimit: quota });
+        
+        res.json({
+          success: true,
+          vendor: key.vendor,
+          name: key.name,
+          quotaRemaining: quota,
+          isValid: quota > 0,
+          message: quota > 0 ? `Key is valid with ${quota} credits remaining` : 'Key has no quota remaining'
+        });
+      } else {
+        // For other vendors, just verify the key format
+        res.json({
+          success: true,
+          vendor: key.vendor,
+          name: key.name,
+          message: 'Key format is valid (quota check not available for this vendor)'
+        });
+      }
+    } catch (error: any) {
+      console.error("API key test error:", error);
+      res.status(500).json({ 
+        success: false, 
+        error: error.message || "Failed to test API key",
+        isValid: false
+      });
+    }
+  });
+
+  // Refresh quotas from vendor for all keys
+  app.post("/api/admin/api-key-pool/refresh-quotas", authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
+    try {
+      const keys = await storage.getAllApiKeysInPool();
+      const results: any[] = [];
+      
+      for (const key of keys) {
+        const apiKey = key.api_key || key.apiKey;
+        if (key.vendor === 'textbelt' && apiKey) {
+          try {
+            const response = await axios.get(`https://textbelt.com/quota/${apiKey}`);
+            const quota = response.data.quotaRemaining ?? 0;
+            await storage.updateApiKeyInPool(key.id, { quotaLimit: quota });
+            results.push({ id: key.id, name: key.name, quota, success: true });
+          } catch (e: any) {
+            results.push({ id: key.id, name: key.name, success: false, error: e.message });
+          }
+        } else if (key.vendor === 'anveo') {
+          // Anveo is pay-per-use - set notional quota of 10000 per number
+          await storage.updateApiKeyInPool(key.id, { quotaLimit: 10000 });
+          results.push({ id: key.id, name: key.name, quota: 10000, success: true, note: 'Pay-per-use (notional)' });
+        }
+      }
+      
+      res.json({ 
+        success: true, 
+        message: `Refreshed quotas for ${results.filter(r => r.success).length} keys`,
+        results
+      });
+    } catch (error: any) {
+      console.error("API key quota refresh error:", error);
+      res.status(500).json({ success: false, error: error.message || "Failed to refresh quotas" });
+    }
+  });
+
+  // Reset daily quotas for all keys
+  app.post("/api/admin/api-key-pool/reset-quotas", authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
+    try {
+      await storage.resetApiKeyQuotas();
+      res.json({ success: true, message: "All API key quotas reset" });
+    } catch (error: any) {
+      console.error("API key quota reset error:", error);
+      res.status(500).json({ success: false, error: error.message || "Failed to reset quotas" });
+    }
+  });
+
+  // ============================================
+  // SMS QUEUE MANAGEMENT (Bulk Processing)
+  // ============================================
+
+  // Get queue statistics
+  app.get("/api/admin/sms-queue/stats", authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
+    try {
+      const stats = await storage.getQueueStatistics();
+      const routeOpen = isRoutesOpenNow();
+      const depth = await storage.getQueueDepth();
+      
+      res.json({
+        success: true,
+        routeWindowOpen: routeOpen,
+        queue: {
+          pending: depth.pending || stats.pending || 0,
+          processing: depth.processing || stats.processing || 0,
+          sent: depth.sent || stats.sent || 0,
+          failed: depth.failed || stats.failed || 0
+        },
+        // stats is an object, not array - return as-is for detailed breakdown
+        recentStats: stats.byPriority || {}
+      });
+    } catch (error: any) {
+      console.error("Queue stats error:", error);
+      res.status(500).json({ success: false, error: error.message || "Failed to fetch queue stats" });
+    }
+  });
+
+  // Get queued messages (paginated)
+  app.get("/api/admin/sms-queue", authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
+    try {
+      const status = req.query.status as string || undefined;
+      const limit = parseInt(req.query.limit as string) || 100;
+      const offset = parseInt(req.query.offset as string) || 0;
+      
+      const messages = await storage.getQueuedMessages(limit, status as any, offset);
+      const depth = await storage.getQueueDepth();
+      
+      res.json({
+        success: true,
+        messages,
+        pagination: {
+          limit,
+          offset,
+          total: depth.pending + depth.processing
+        }
+      });
+    } catch (error: any) {
+      console.error("Queue fetch error:", error);
+      res.status(500).json({ success: false, error: error.message || "Failed to fetch queue" });
+    }
+  });
+
+  // Cancel queued messages
+  app.post("/api/admin/sms-queue/cancel", authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
+    try {
+      const { messageIds, userId, all } = req.body;
+      
+      let cancelledCount = 0;
+      
+      if (all === true) {
+        // Cancel all pending messages
+        cancelledCount = await storage.cancelQueuedMessages();
+      } else if (messageIds && Array.isArray(messageIds)) {
+        // Cancel specific messages
+        for (const id of messageIds) {
+          const success = await storage.updateQueueMessageStatus(id, 'cancelled');
+          if (success) cancelledCount++;
+        }
+      } else if (userId) {
+        // Cancel all messages for a user
+        cancelledCount = await storage.cancelQueuedMessages(userId);
+      }
+      
+      res.json({
+        success: true,
+        cancelledCount,
+        message: `Cancelled ${cancelledCount} queued messages`
+      });
+    } catch (error: any) {
+      console.error("Queue cancel error:", error);
+      res.status(500).json({ success: false, error: error.message || "Failed to cancel messages" });
+    }
+  });
+
+  // Get route window info
+  app.get("/api/admin/route-window", authenticateToken, requireRole(['admin','supervisor']), async (req: any, res) => {
+    try {
+      const pst = getHourInZone('America/Los_Angeles');
+      const est = getHourInZone('America/New_York');
+      const isOpen = isRoutesOpenNow();
+      
+      // Calculate time until next state change
+      let minutesUntilChange = 0;
+      if (isOpen) {
+        // Open from 08:00 PST, closes at 21:00 EST
+        // Calculate minutes until 21:00 EST
+        if (est.hour < 21) {
+          minutesUntilChange = (21 - est.hour - 1) * 60 + (60 - est.minute);
+        }
+      } else {
+        // Closed, opens at 08:00 PST
+        if (pst.hour < 8) {
+          minutesUntilChange = (8 - pst.hour - 1) * 60 + (60 - pst.minute);
+        } else {
+          // After 08:00 PST but before EST catches up
+          minutesUntilChange = 0;
+        }
+      }
+      
+      res.json({
+        success: true,
+        isOpen,
+        currentTime: {
+          pst: `${pst.hour}:${pst.minute.toString().padStart(2, '0')}`,
+          est: `${est.hour}:${est.minute.toString().padStart(2, '0')}`
+        },
+        window: {
+          opens: '08:00 PST (8:00 AM)',
+          closes: '21:00 EST (9:00 PM)'
+        },
+        minutesUntilChange,
+        status: isOpen ? 'Routes are OPEN - messages can be sent' : 'Routes are CLOSED - messages will be queued'
+      });
+    } catch (error: any) {
+      console.error("Route window error:", error);
+      res.status(500).json({ success: false, error: error.message || "Failed to get route window info" });
     }
   });
 

@@ -5,6 +5,12 @@ import { authenticateToken } from '../middleware/auth';
 import { z } from 'zod';
 
 const router = Router();
+
+// Lazy import storage to avoid circular dependency issues with esbuild
+const getStorage = async () => {
+  const { storage } = await import('../storage');
+  return storage;
+};
 const vendorManager = VendorManager.getInstance();
 
 // Balance cache to speed up vendor balance requests
@@ -14,7 +20,87 @@ const balanceCache: {
   vendorName: string;
   timestamp: number;
 } = { value: null, vendor: '', vendorName: '', timestamp: 0 };
-const BALANCE_CACHE_TTL = 30000; // 30 seconds cache
+const BALANCE_CACHE_TTL = 60000; // 60 seconds cache (increased from 30s for faster UI)
+
+// Pre-warm balance cache on startup and refresh every 60s in background
+let cacheWarmupTimeout: NodeJS.Timeout | null = null;
+async function warmBalanceCache() {
+  try {
+    let config;
+    try { config = vendorManager.getConfig(); } catch { return; }
+    const vendor = vendorManager.getVendor(config.activeVendorId);
+    if (!vendor) return;
+    
+    // Get storage once at the top to avoid scope issues
+    const storage = await getStorage();
+    
+    let balance: number | null = null;
+    switch (vendor.type) {
+      case 'textbelt':
+        // Check for pooled API keys first
+        const activeKeys = await storage.getActiveApiKeys('textbelt');
+        if (activeKeys && activeKeys.length > 0) {
+          console.log(`💰 Warming cache with ${activeKeys.length} TextBelt pooled keys...`);
+          balance = await getTextBeltPooledBalance(activeKeys);
+        } else {
+          balance = await getTextBeltBalance(vendor.config.apiKey);
+        }
+        break;
+      case 'extremesms':
+        balance = await getExtremeSMSBalance(vendor.config.apiKey);
+        break;
+      case 'anveo':
+        // Get real account balance from Anveo API
+        if (vendor.config.apiKey) {
+          const anveoDollarBalance = await getAnveoBalance(vendor.config.apiKey);
+          if (anveoDollarBalance !== null) {
+            // Convert dollar balance to credits using vendor cost
+            const costConfig = await storage.getSystemConfig('anveo_cost_per_sms');
+            const vendorCostPerSms = parseFloat(costConfig?.value || '0.01');
+            balance = Math.floor(anveoDollarBalance / vendorCostPerSms);
+            console.log(`💰 Anveo account balance: $${anveoDollarBalance} = ${balance} credits (@ $${vendorCostPerSms}/SMS)`);
+          } else {
+            balance = -1;
+          }
+        } else {
+          // Fallback: check if we have API keys in pool
+          const anveoKeys = await storage.getActiveApiKeys('anveo');
+          if (anveoKeys.length > 0 && anveoKeys[0].api_key) {
+            const anveoDollarBalance = await getAnveoBalance(anveoKeys[0].api_key);
+            if (anveoDollarBalance !== null) {
+              const costConfig = await storage.getSystemConfig('anveo_cost_per_sms');
+              const vendorCostPerSms = parseFloat(costConfig?.value || '0.01');
+              balance = Math.floor(anveoDollarBalance / vendorCostPerSms);
+              console.log(`💰 Anveo (from pool) account balance: $${anveoDollarBalance} = ${balance} credits (@ $${vendorCostPerSms}/SMS)`);
+            } else {
+              balance = -1;
+            }
+          }
+        }
+        // If balance is still null, use -1 to indicate pay-per-use
+        if (balance === null) {
+          balance = -1;
+        }
+        break;
+    }
+    
+    if (balance !== null) {
+      balanceCache.value = balance;
+      balanceCache.vendor = vendor.id;
+      balanceCache.vendorName = vendor.name;
+      balanceCache.timestamp = Date.now();
+      console.log('💰 Balance cache warmed:', balance, 'credits for', vendor.id);
+    }
+  } catch (e) {
+    console.error('💰 Failed to warm balance cache:', e);
+  }
+  
+  // Schedule next warmup
+  cacheWarmupTimeout = setTimeout(warmBalanceCache, BALANCE_CACHE_TTL);
+}
+
+// Start cache warming after a short delay to let VendorManager initialize
+setTimeout(warmBalanceCache, 5000);
 
 // Validation schemas
 const SwitchVendorSchema = z.object({
@@ -144,18 +230,22 @@ router.post('/api/admin/sms-vendors/:vendorId/config', authenticateToken, async 
   try {
     const { vendorId } = req.params;
     const config = req.body;
-    
+
     const vendor = vendorManager.getVendor(vendorId);
     if (!vendor) {
       return res.status(404).json({ success: false, error: 'Vendor not found' });
     }
 
-    // Merge existing config with new config
+    // Handle enabled field separately - it belongs on the vendor object, not in config
+    const { enabled, ...configOnly } = config;
+
+    // Merge existing config with new config (excluding enabled)
     const updatedVendor = {
       ...vendor,
+      ...(enabled !== undefined && { enabled }),
       config: {
         ...vendor.config,
-        ...config
+        ...configOnly
       }
     };
 
@@ -341,6 +431,9 @@ router.get('/api/admin/sms-vendors/:vendorId/balance', authenticateToken, async 
       case 'extremesms':
         balance = await getExtremeSMSBalance(vendor.config.apiKey);
         break;
+      case 'anveo':
+        balance = await getAnveoBalance(vendor.config.apiKey);
+        break;
       case 'twilio':
         balance = await getTwilioBalance(vendor.config.accountSid, vendor.config.authToken);
         break;
@@ -364,6 +457,33 @@ router.get('/api/admin/sms-vendors/:vendorId/balance', authenticateToken, async 
       success: false,
       error: 'Failed to get vendor balance',
     });
+  }
+});
+
+// Refresh/clear vendor balance cache
+router.post('/api/admin/vendor-balance/refresh', authenticateToken, async (req: any, res) => {
+  if (req.user?.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin only' });
+  }
+  try {
+    // Clear the cache
+    balanceCache.value = null;
+    balanceCache.vendor = '';
+    balanceCache.vendorName = '';
+    balanceCache.timestamp = 0;
+    
+    // Force refresh by calling warmBalanceCache
+    await warmBalanceCache();
+    
+    res.json({ 
+      success: true, 
+      message: 'Balance cache refreshed',
+      newBalance: balanceCache.value,
+      vendor: balanceCache.vendor
+    });
+  } catch (error) {
+    console.error('Error refreshing balance cache:', error);
+    res.status(500).json({ success: false, error: 'Failed to refresh balance cache' });
   }
 });
 
@@ -429,7 +549,16 @@ router.get('/api/admin/vendor-balance', authenticateToken, async (req: any, res)
 
     switch (vendor.type) {
       case 'textbelt':
-        balance = await getTextBeltBalance(vendor.config.apiKey);
+        // Check if API key pooling is enabled for TextBelt
+        const storageInst = await getStorage();
+        const activeKeys = await storageInst.getActiveApiKeys('textbelt');
+        if (activeKeys && activeKeys.length > 0) {
+          console.log(`💰 Found ${activeKeys.length} active TextBelt keys, summing balances...`);
+          balance = await getTextBeltPooledBalance(activeKeys);
+        } else {
+          console.log('💰 No pooled keys, using single vendor config key');
+          balance = await getTextBeltBalance(vendor.config.apiKey);
+        }
         break;
       case 'extremesms':
         balance = await getExtremeSMSBalance(vendor.config.apiKey);
@@ -439,6 +568,37 @@ router.get('/api/admin/vendor-balance', authenticateToken, async (req: any, res)
         break;
       case 'vonage':
         balance = await getVonageBalance(vendor.config.apiKey, vendor.config.apiSecret);    
+        break;
+      case 'anveo':
+        // Get real account balance from Anveo API
+        if (vendor.config.apiKey) {
+          const anveoDollarBalance = await getAnveoBalance(vendor.config.apiKey);
+          if (anveoDollarBalance !== null) {
+            // Convert dollar balance to credits using vendor cost
+            const storageInst = await getStorage();
+            const costConfig = await storageInst.getSystemConfig('anveo_cost_per_sms');
+            const vendorCostPerSms = parseFloat(costConfig?.value || '0.01');
+            balance = Math.floor(anveoDollarBalance / vendorCostPerSms);
+            console.log(`💰 Anveo account balance: $${anveoDollarBalance} = ${balance} credits (@ $${vendorCostPerSms}/SMS)`);
+          }
+        } else {
+          // Fallback: check if we have API keys in pool
+          const storageAnveo = await getStorage();
+          const anveoKeys = await storageAnveo.getActiveApiKeys('anveo');
+          if (anveoKeys.length > 0 && anveoKeys[0].api_key) {
+            const anveoDollarBalance = await getAnveoBalance(anveoKeys[0].api_key);
+            if (anveoDollarBalance !== null) {
+              const costConfig = await storageAnveo.getSystemConfig('anveo_cost_per_sms');
+              const vendorCostPerSms = parseFloat(costConfig?.value || '0.01');
+              balance = Math.floor(anveoDollarBalance / vendorCostPerSms);
+              console.log(`💰 Anveo (from pool) account balance: $${anveoDollarBalance} = ${balance} credits (@ $${vendorCostPerSms}/SMS)`);
+            }
+          }
+        }
+        // If balance is null, use -1 to indicate pay-per-use (frontend will show "Pay-per-use")
+        if (balance === null) {
+          balance = -1;
+        }
         break;
     }
     console.log('💰 Balance result:', balance);
@@ -451,7 +611,7 @@ router.get('/api/admin/vendor-balance', authenticateToken, async (req: any, res)
 
     res.json({
       success: true,
-      balance: balance || 0,
+      balance: balance !== null ? balance : 0,
       vendor: isAdmin ? vendor.id : 'ibiki',
       vendorName: isAdmin ? vendor.name : 'Ibiki'
     });
@@ -537,6 +697,101 @@ async function getTextBeltBalance(apiKey: string): Promise<number | null> {
   }
 }
 
+async function getTextBeltPooledBalance(keys: any[]): Promise<number | null> {
+  try {
+    let totalBalance = 0;
+    let successCount = 0;
+    
+    console.log(`💰 Checking ${keys.length} TextBelt keys...`);
+    
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      // Add delay BEFORE request (except first one) to avoid rate limiting
+      if (i > 0) {
+        console.log(`💰 Waiting 2 seconds before checking next key...`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+      
+      // Retry up to 3 times with increasing delay for rate-limited keys
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          // Log the key structure to debug field names
+          if (attempt === 0) {
+            console.log(`💰 Key object: name=${key.name}, apiKey field=${key.apiKey ? '***' : 'undefined'}, api_key field=${key.api_key ? '***' : 'undefined'}`);
+          }
+          
+          // Handle both camelCase and snake_case field names
+          const apiKey = key.apiKey || key.api_key;
+          if (!apiKey) {
+            console.log(`💰 Key "${key.name}": no API key found in object`);
+            break;
+          }
+          
+          // Use Webshare proxy - get a different proxy for each attempt
+          const fetchOptions: RequestInit = {};
+          if (webshareProxyManager.isEnabled()) {
+            const proxyAgent = await webshareProxyManager.getProxyAgent();
+            if (proxyAgent) {
+              (fetchOptions as any).agent = proxyAgent;
+            }
+          }
+          
+          const response = await fetch(`https://textbelt.com/quota/${apiKey}`, fetchOptions);
+          const data = await response.json().catch(() => null);
+          
+          console.log(`💰 Key "${key.name}" (attempt ${attempt + 1}) response: status=${response.status}, data=${JSON.stringify(data)}`);
+          
+          if (response.status === 429) {
+            // Rate limited - wait and retry with different proxy
+            if (attempt < 2) {
+              console.log(`💰 Key "${key.name}": rate limited, retrying in ${(attempt + 1) * 3} seconds...`);
+              await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 3000));
+              continue; // Try again
+            }
+            console.log(`💰 Key "${key.name}": still rate limited after 3 attempts`);
+            break;
+          }
+          
+          if (response.ok && data && data.success !== false) {
+            const remaining =
+              typeof data.quotaRemaining === 'number'
+                ? data.quotaRemaining
+                : typeof data.quota === 'number'
+                  ? data.quota
+                  : typeof data.remaining === 'number'
+                    ? data.remaining
+                    : null;
+          
+            if (typeof remaining === 'number') {
+              console.log(`💰 Key "${key.name}": ${remaining} credits`);
+              totalBalance += remaining;
+              successCount++;
+            } else {
+              console.log(`💰 Key "${key.name}": could not parse remaining from response`);
+            }
+          }
+          break; // Success - exit retry loop
+        } catch (err) {
+          console.warn(`💰 Failed to get balance for key ${key.name} (attempt ${attempt + 1}):`, err);
+          if (attempt < 2) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+      }
+    }
+    
+    if (successCount > 0) {
+      console.log(`💰 TextBelt pooled total: ${totalBalance} credits from ${successCount}/${keys.length} keys`);
+      return totalBalance;
+    }
+    
+    console.log(`💰 TextBelt pooled balance: no successful responses`);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function getExtremeSMSBalance(apiKey: string): Promise<number | null> {
   try {
     const response = await fetch(`https://extremesms.net/api/balance?key=${apiKey}`);
@@ -572,6 +827,43 @@ async function getVonageBalance(apiKey: string, apiSecret: string): Promise<numb
   }
 }
 
+async function getAnveoBalance(userKey: string): Promise<number | null> {
+  try {
+    // Anveo REST API v2 for ACCOUNT.GETBALANCE
+    const url = `https://www.anveo.com/api/v2.asp?userkey=${userKey}&action=ACCOUNT.GETBALANCE`;
+    console.log('[Anveo Balance] Fetching balance from v2 API...');
+
+    const response = await fetch(url, { method: 'GET' });
+    const text = await response.text();
+    console.log(`[Anveo Balance] Response (${response.status}):`, text.substring(0, 200));
+
+    // Response is XML: <RESPONSE><RESULT>2.18</RESULT></RESPONSE>
+    const resultMatch = text.match(/<RESULT>([0-9.]+)<\/RESULT>/i);
+    if (resultMatch && resultMatch[1]) {
+      const balance = parseFloat(resultMatch[1]);
+      console.log('[Anveo Balance] ✅ Parsed balance: $' + balance);
+      return balance;
+    }
+
+    // Fallback: try parsing as plain number
+    const plainBalance = parseFloat(text.trim());
+    if (!isNaN(plainBalance)) {
+      console.log('[Anveo Balance] ✅ Parsed plain balance: $' + plainBalance);
+      return plainBalance;
+    }
+
+    // Check for error response
+    if (text.toLowerCase().includes('error') || text.toLowerCase().includes('invalid')) {
+      console.log('[Anveo Balance] API Error:', text);
+    }
+
+    return null;
+  } catch (err) {
+    console.error('[Anveo Balance] Error:', err);
+    return null;
+  }
+}
+
 // ============================================
 // PROXY MANAGEMENT ROUTES
 // ============================================
@@ -585,9 +877,7 @@ router.get('/api/admin/proxy-status', authenticateToken, async (req: any, res) =
     }
 
     const webshareStatus = webshareProxyManager.getStatus();
-    const staticStatus = (await import('../webshare-proxy')).webshareProxyManager.constructor.getStaticProxyStatus 
-      ? { enabled: !!process.env.TEXTBELT_PROXY_URL, url: process.env.TEXTBELT_PROXY_URL?.replace(/\/\/.*@/, '//*****@') || null }
-      : { enabled: false, url: null };
+    const staticStatus = { enabled: !!process.env.TEXTBELT_PROXY_URL, url: process.env.TEXTBELT_PROXY_URL?.replace(/\/\/.*@/, '//*****@') || null };
 
     res.json({
       webshare: webshareStatus,

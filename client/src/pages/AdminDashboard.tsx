@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Users, Settings, Activity, ArrowLeft, Wallet, Copy, CheckCircle, Send, Inbox as InboxIcon, Clock, Star, Smartphone, MessageSquare, HelpCircle, Eye, EyeOff, Download, Shield, Globe } from "lucide-react";
+import { Users, Settings, Activity, ArrowLeft, Wallet, Copy, CheckCircle, Send, Inbox as InboxIcon, Clock, Star, Smartphone, MessageSquare, HelpCircle, Eye, EyeOff, Download, Shield, Globe, HeartPulse, Phone } from "lucide-react";
 import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -34,6 +34,9 @@ import { MessageStatusChart } from "@/components/MessageStatusChart";
 import MessageStatusTiles from "@/components/MessageStatusTiles";
 import SmsVendorManager from "@/components/SmsVendorManager";
 import { ProxyManagement } from "@/components/ProxyManagement";
+import SystemHealthDashboard from "@/components/SystemHealthDashboard";
+import ApiKeyPoolManager from "@/components/ApiKeyPoolManager";
+import { NumberPoolManager } from "@/components/NumberPoolManager";
 
 // Vendor management component removed per user request
 // function VendorManager() { ... }
@@ -58,12 +61,24 @@ export default function AdminDashboard() {
   const [groupIdPricing, setGroupIdPricing] = useState<string>('');
   const [groupExtremeCost, setGroupExtremeCost] = useState<string>('');
   const [groupClientRate, setGroupClientRate] = useState<string>('');
+  const [calcSmsCount, setCalcSmsCount] = useState<string>('10000'); // Profitability calculator
   
   // Compliance settings state
   const [complianceSenderName, setComplianceSenderName] = useState<string>('');
   const [complianceOptOutEnabled, setComplianceOptOutEnabled] = useState<boolean>(false);
   const [complianceOptOutText, setComplianceOptOutText] = useState<string>('Reply STOP to unsubscribe');
   const [complianceFirstMessageOnly, setComplianceFirstMessageOnly] = useState<boolean>(true);
+
+  // Crypto wallet state
+  const [cryptoWallets, setCryptoWallets] = useState<{btc: string; eth: string; usdt: string; usdt_erc20: string; usdt_trc20: string; usdt_bep20: string; ltc: string}>({
+    btc: '', eth: '', usdt: '', usdt_erc20: '', usdt_trc20: '', usdt_bep20: '', ltc: ''
+  });
+
+  // Maintenance mode state
+  const [maintenanceMode, setMaintenanceMode] = useState<boolean>(false);
+
+  // Support email state
+  const [supportEmail, setSupportEmail] = useState<string>('ibiki_dash@proton.me');
 
   const usTimezones = [
     { value: "America/New_York", label: "Eastern Time (ET)" },
@@ -86,6 +101,37 @@ export default function AdminDashboard() {
 
   const { data: config } = useQuery<{ success: boolean; config: Record<string, string> }>({ queryKey: ['/api/admin/config'] });
   const { data: profile, isLoading: profileLoading, error: profileError } = useQuery<{ user: { id: string; role: string; email?: string } }>({ queryKey: ['/api/client/profile'] });
+  
+  const isAdmin = profile?.user?.role === 'admin' || profile?.user?.email === 'ibiki_dash@proton.me';
+  const isSupervisor = profile?.user?.role === 'supervisor';
+  
+  // Crypto wallets query - ALWAYS call hook (React hooks rule)
+  const { data: cryptoWalletsData } = useQuery<{btc: string; eth: string; usdt: string; usdt_erc20: string; usdt_trc20: string; usdt_bep20: string; ltc: string}>({ 
+    queryKey: ['/api/admin/crypto-wallets'],
+    enabled: true, // Always enabled to maintain consistent hook order
+    retry: false, // Don't retry on auth failures
+    throwOnError: false, // Don't throw 403 errors
+    meta: { errorBoundary: false }, // Don't trigger error boundary
+  });
+
+  // Maintenance mode query - ALWAYS call hook (React hooks rule)
+  const { data: maintenanceModeData } = useQuery<{enabled: boolean}>({ 
+    queryKey: ['/api/admin/maintenance-mode'],
+    enabled: true, // Always enabled to maintain consistent hook order
+    retry: false, // Don't retry on auth failures
+    throwOnError: false, // Don't throw 403 errors
+    meta: { errorBoundary: false }, // Don't trigger error boundary
+  });
+
+  // Support email query - ALWAYS call hook (React hooks rule)
+  const { data: supportEmailData } = useQuery<{email: string}>({ 
+    queryKey: ['/api/admin/support-email'],
+    enabled: true, // Always enabled to maintain consistent hook order
+    retry: false, // Don't retry on auth failures
+    throwOnError: false, // Don't throw 403 errors
+    meta: { errorBoundary: false }, // Don't trigger error boundary
+  });
+  
   const [routeOverride, setRouteOverride] = useState<boolean>(false);
   const [routesOpen, setRoutesOpen] = useState<boolean>(true);
   const [countdown, setCountdown] = useState<number>(0);
@@ -106,6 +152,27 @@ export default function AdminDashboard() {
       setComplianceFirstMessageOnly((config.config.compliance_first_only || 'true') === 'true');
     }
   }, [config]);
+
+  // Load crypto wallets
+  useEffect(() => {
+    if (cryptoWalletsData) {
+      setCryptoWallets(cryptoWalletsData);
+    }
+  }, [cryptoWalletsData]);
+
+  // Load maintenance mode
+  useEffect(() => {
+    if (maintenanceModeData) {
+      setMaintenanceMode(maintenanceModeData.enabled);
+    }
+  }, [maintenanceModeData]);
+
+  // Load support email
+  useEffect(() => {
+    if (supportEmailData) {
+      setSupportEmail(supportEmailData.email);
+    }
+  }, [supportEmailData]);
 
   useEffect(() => {
     const getHourInZone = (tz: string) => {
@@ -135,10 +202,10 @@ export default function AdminDashboard() {
     const calc = () => {
       const pst = getHourInZone('America/Los_Angeles');
       const est = getHourInZone('America/New_York');
-      const afterPst9 = pst.hour > 9 || (pst.hour === 9 && pst.minute >= 0);
+      const afterPst21 = pst.hour > 21 || (pst.hour === 21 && pst.minute >= 0);
       const beforeEst20 = est.hour < 20 || (est.hour === 20 && est.minute === 0);
-      setRoutesOpen(afterPst9 && beforeEst20);
-      const next = (afterPst9 && beforeEst20) ? secondsUntil('America/New_York', 20, 0) : secondsUntil('America/Los_Angeles', 9, 0);
+      setRoutesOpen(afterPst21 && beforeEst20);
+      const next = (afterPst21 && beforeEst20) ? secondsUntil('America/New_York', 20, 0) : secondsUntil('America/Los_Angeles', 21, 0);
       setCountdown(next);
     };
     calc();
@@ -239,6 +306,12 @@ export default function AdminDashboard() {
   const webhookStatusQuery = useQuery<{ success: boolean; lastEvent: any; lastEventAt: string | null; lastRoutedUser: string | null }>({
     queryKey: ['/api/admin/webhook/status']
   });
+  
+  const { data: webInbox } = useQuery<{ success: boolean; messages: Array<{ id: string; isRead: boolean }>; count?: number }>({
+    queryKey: ['/api/web/inbox'],
+    refetchInterval: 5000
+  });
+  
   const inboxRetrieveMutation = useMutation({
     mutationFn: async () => {
       return await apiRequest('/api/web/inbox/retrieve', { method: 'POST' });
@@ -309,7 +382,9 @@ export default function AdminDashboard() {
       const r = await apiRequest(url);
       return r.json();
     },
-    enabled: groupReportTrigger > 0 && (profile?.user?.role === 'admin' ? !!groupIdPricing : !!profile?.user?.role),
+    enabled: true, // Always enabled to maintain hook order
+    retry: false,
+    throwOnError: false,
   });
   const setWebhookUrlMutation = useMutation({
     mutationFn: async (url: string) => {
@@ -365,10 +440,7 @@ export default function AdminDashboard() {
     enabled: diagnosticsEnabled,
     staleTime: 30000,  // Cache for 30 seconds
     gcTime: 300000,    // Keep for 5 minutes
-    refetchOnWindowFocus: false,
-    onSuccess: () => {
-      setLastRunTime(new Date());
-    }
+    refetchOnWindowFocus: false
   });
   const phraserConfigQuery = useQuery<{ success: boolean; provider: string; model: string; keyPresent: boolean; rules: any }>({ queryKey: ['/api/admin/paraphraser/config'] });
   
@@ -599,16 +671,7 @@ export default function AdminDashboard() {
     refetchInterval: 5000 // Auto-refresh every 5 seconds
   });
 
-  const { data: balanceData, isLoading: balanceLoading, error: balanceError } = useQuery<{ 
-    success: boolean; 
-    balance: number;
-    currency: string;
-  }>({
-    queryKey: ['/api/admin/extremesms-balance'],
-    refetchInterval: 30000, // Auto-refresh every 30 seconds
-    retry: 2
-  });
-
+  // First fetch vendor balance to determine active vendor
   const { data: vendorBalanceData, isLoading: vendorBalanceLoading } = useQuery<{ 
     success: boolean; 
     balance: number;
@@ -616,17 +679,32 @@ export default function AdminDashboard() {
     vendorName: string;
   }>({
     queryKey: ['/api/admin/vendor-balance'],
-    refetchInterval: 30000, // Auto-refresh every 30 seconds
+    refetchInterval: 15000, // Auto-refresh every 15 seconds for faster sync
+    staleTime: 0, // Allow immediate refetch after invalidation
     retry: 2
   });
 
+  // Get active vendor from vendorBalanceData (or default to anveo)
+  const activeVendor = vendorBalanceData?.vendor || 'anveo';
+
+  // Only fetch extremesms balance if the active vendor is extremesms
+  const { data: balanceData, isLoading: balanceLoading, error: balanceError } = useQuery<{ 
+    success: boolean; 
+    balance: number;
+    currency: string;
+  }>({
+    queryKey: ['/api/admin/extremesms-balance'],
+    refetchInterval: 30000, // Auto-refresh every 30 seconds
+    retry: 2,
+    enabled: activeVendor === 'extremesms' // Only query when ExtremeSMS is active vendor
+  });
+
   const clients = clientsData?.clients || [];
-  const isSupervisor = profile?.user?.role === 'supervisor';
+  // isSupervisor already defined at top of component
   const totalMessages = statsData?.totalMessages || 0;
   const totalClients = statsData?.totalClients || clients.length;
   const extremeBalance = balanceData?.balance ?? null;
   const balanceCurrency = balanceData?.currency || 'USD';
-  const activeVendor = vendorBalanceData?.vendor || 'textbelt';
   const vendorBalance = vendorBalanceData?.balance ?? 0;
   const getClientCredits = (c: any) => {
     if (activeVendor === 'textbelt') return parseFloat(c.creditsTextbelt || '0');
@@ -644,7 +722,9 @@ export default function AdminDashboard() {
       return r.json();
     },
     refetchInterval: 10000,
-    enabled: !!myGroupId && profile?.user?.role !== undefined
+    enabled: true, // Always enabled to maintain hook order
+    retry: false,
+    throwOnError: false,
   });
   const groupPoolCredits = (groupPool as any)?.credits;
   const groupSupervisorCredits = typeof groupPoolCredits === 'number' && !isNaN(groupPoolCredits)
@@ -659,6 +739,10 @@ export default function AdminDashboard() {
   const clientRateNumber = parseFloat(clientRate || config?.config?.client_rate_per_sms || '0') || 0;
   const creditsValueUSD = (sumCredits * clientRateNumber).toFixed(2);
   const extremeUSD = (extremeBalance !== null) ? (extremeBalance * (parseFloat(extremeCost || '0') || 0)).toFixed(2) : null;
+
+  // Inbox counts for supervisor/admin users
+  const inboxCount = (webInbox?.messages?.length || webInbox?.count || 0) as number;
+  const unreadCount = (webInbox?.messages || []).filter((m) => !m.isRead).length;
 
   const syncCreditsMutation = useMutation({
     mutationFn: async () => {
@@ -693,7 +777,9 @@ export default function AdminDashboard() {
 
   const groupPricingAllQuery = useQuery<{ success: boolean; base: { extremeCost: number; clientRate: number }; groups: Array<{ groupId: string; name: string | null; extremeCost?: number; clientRate?: number; margin?: number }> }>({
     queryKey: ['/api/admin/pricing/all'],
-    enabled: profile?.user?.role === 'admin'
+    enabled: true, // Always enabled to maintain hook order
+    retry: false,
+    throwOnError: false,
   });
   const deleteGroupPricingMutation = useMutation({
     mutationFn: async (groupId: string) => {
@@ -718,7 +804,7 @@ export default function AdminDashboard() {
             <TableRow>
               <TableHead>Group ID</TableHead>
               <TableHead>Name</TableHead>
-              <TableHead>Extreme Cost</TableHead>
+              <TableHead>Vendor Cost</TableHead>
               <TableHead>Client Rate</TableHead>
               <TableHead>Margin</TableHead>
               <TableHead>Actions</TableHead>
@@ -831,13 +917,11 @@ export default function AdminDashboard() {
       <div className="p-6 space-y-6">
         
         <div className="flex items-center gap-4">
-          <Link href={isSupervisor ? "/adminsup" : (profile?.user?.role === 'admin' ? "/admin" : "/dashboard")}>
-            <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
-              <ArrowLeft className="h-5 w-5" strokeWidth={3} />
-            </Button>
-          </Link>
           <div>
-            <h1 className="text-4xl font-bold tracking-tight">{isSupervisor ? t('supervisor.title') : t('admin.title')}</h1>
+            <h1 className="text-4xl font-bold tracking-tight">
+              <span className="text-blue-600">{(isSupervisor ? t('supervisor.title') : t('admin.title')).charAt(0)}</span>
+              {(isSupervisor ? t('supervisor.title') : t('admin.title')).slice(1)}
+            </h1>
             <p className="text-muted-foreground mt-2">{isSupervisor ? t('supervisor.subtitle') : t('admin.subtitle')}</p>
           </div>
           {profile?.user?.role === 'admin' && (
@@ -865,9 +949,9 @@ export default function AdminDashboard() {
           />
           <StatCard
             title={t('admin.stats.systemStatus')}
-            value={t('admin.stats.healthy')}
+            value={maintenanceMode ? 'Maintenance' : t('admin.stats.healthy')}
             icon={Settings}
-            description={`${vendorBalanceData?.vendorName ? `Vendor: ${vendorBalanceData.vendorName}` : 'No vendor'}${statsData?.restarts !== undefined ? ` • Restarts: ${statsData.restarts}` : ''}`}
+            description={maintenanceMode ? '🟠 System in maintenance mode' : `${vendorBalanceData?.vendorName ? `Vendor: ${vendorBalanceData.vendorName}` : 'No vendor'}${!isSupervisor && statsData?.restarts !== undefined ? ` • Restarts: ${statsData.restarts}` : ''}`}
           />
           <StatCard
             title={'User'}
@@ -912,18 +996,27 @@ export default function AdminDashboard() {
                     {isSupervisor
                       ? `${groupSupervisorCredits.toFixed(2)} credits`
                       : (vendorBalanceLoading ? 'Loading...' : vendorBalanceData?.success ? (
-                          `${vendorBalanceData.balance.toLocaleString()} credits`
+                          vendorBalanceData.balance === -1 
+                            ? <span className="text-blue-600">Pay-per-use 💳</span>
+                            : `${vendorBalanceData.balance.toLocaleString()} credits`
                         ) : (
                           'Loading...'
                         ))}
                   </p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    {isSupervisor ? 'Pooled balance for supervisors in your group' : `Current ${vendorBalanceData?.vendorName || 'vendor'} balance`}
+                    {isSupervisor ? 'Pooled balance for supervisors in your group' : (
+                      vendorBalanceData?.balance === -1 
+                        ? 'Prepaid credit - charged per SMS' 
+                        : `Current ${vendorBalanceData?.vendorName || 'vendor'} balance`
+                    )}
                   </p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    SMS capacity: {isSupervisor ? Math.floor(groupSupervisorCredits).toLocaleString() : (
-                      vendorBalanceData?.success ? Math.floor(vendorBalanceData.balance).toLocaleString() : '0'
-                    )} messages
+                    {vendorBalanceData?.balance === -1 
+                      ? 'Unlimited capacity (prepaid)' 
+                      : `SMS capacity: ${isSupervisor ? Math.floor(groupSupervisorCredits).toLocaleString() : (
+                        vendorBalanceData?.success ? Math.floor(vendorBalanceData.balance).toLocaleString() : '0'
+                      )} messages`
+                    }
                   </p>
                   {profile?.user?.role === 'admin' && !isSupervisor && (
                     <p className="text-xs text-blue-600 mt-1">
@@ -936,7 +1029,7 @@ export default function AdminDashboard() {
                   <>
                     <div>
                       <p className="text-xs text-muted-foreground">Allocated Credits</p>
-                      <p className={`text-2xl font-bold tracking-tight mt-1 ${isSupervisor ? 'text-green-600' : (extremeBalance !== null && Math.abs((extremeBalance - sumCredits)) <= 0.01 ? 'text-green-600' : 'text-red-600')}`}>
+                      <p className={`text-2xl font-bold tracking-tight mt-1 ${isSupervisor ? 'text-green-600' : 'text-blue-600'}`}>
                         {(isSupervisor ? groupClientCredits : sumCredits).toFixed(2)} credits
                       </p>
                       <p className="text-xs text-muted-foreground mt-1">Sum of all client credits</p>
@@ -1004,17 +1097,27 @@ export default function AdminDashboard() {
                     <InboxIcon className="h-5 w-5" />
                     {t('inbox.title')}
                   </CardTitle>
-                  <Link href="/inbox?view=favorites">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 px-2 text-xs bg-yellow-100 text-yellow-800 border border-yellow-500 hover:bg-yellow-200 flex items-center gap-1"
-                      title="★ Favourites"
-                    >
-                      <Star className="h-3 w-3" />
-                      {t('inbox.favorites')}
-                    </Button>
-                  </Link>
+                  <div className="flex items-center gap-2">
+                    <div className="p-2 rounded bg-slate-100 dark:bg-slate-800 text-xs text-slate-700 dark:text-slate-300 font-bold min-w-[3rem] text-center border border-slate-300 dark:border-slate-700">
+                      {inboxCount.toLocaleString()}<span className="ml-1">{t('inbox.indicator.all')}</span>
+                    </div>
+                    {unreadCount > 0 && (
+                      <div className="p-2 rounded bg-blue-600 dark:bg-blue-700 text-xs text-white font-bold min-w-[3rem] text-center border border-blue-500 dark:border-blue-600">
+                        {unreadCount.toLocaleString()}<span className="ml-1">{t('inbox.unreadIndicator')}</span>
+                      </div>
+                    )}
+                    <Link href="/inbox?view=favorites">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs bg-yellow-100 text-yellow-800 border border-yellow-500 hover:bg-yellow-200 flex items-center gap-1"
+                        title="★ Favourites"
+                      >
+                        <Star className="h-3 w-3" />
+                        {t('inbox.favorites')}
+                      </Button>
+                    </Link>
+                  </div>
                 </div>
                 <CardDescription>
                   View and reply to incoming messages
@@ -1088,12 +1191,33 @@ export default function AdminDashboard() {
                   toast({ title: t('common.success'), description: 'Set to Tongyi DeepResearch (free)' });
                 }} className="ml-2">Use Tongyi DeepResearch (free)</Button>
               </div>
-              <div className="flex items-center gap-3">
-                <Label>Model</Label>
-                <Input placeholder="x-ai/grok-4.1-fast:free" defaultValue={phraserConfigQuery.data?.model || 'x-ai/grok-4.1-fast:free'} onBlur={async (e) => {
-                  await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterModel: e.target.value }) });
-                  toast({ title: t('common.success'), description: 'Model saved' });
-                }} />
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <Label className="text-sm font-semibold">Custom Model ID</Label>
+                  <a 
+                    href="https://openrouter.ai/models?order=newest" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="text-xs text-blue-500 hover:text-blue-700 underline"
+                  >
+                    Browse Models →
+                  </a>
+                </div>
+                <Input 
+                  placeholder="e.g., openai/gpt-4o, anthropic/claude-3.5-sonnet, x-ai/grok-2-1212:free" 
+                  className="font-mono text-sm" 
+                  defaultValue={phraserConfigQuery.data?.model || 'qwen/qwen3-coder:free'} 
+                  onBlur={async (e) => {
+                    const v = e.target.value.trim();
+                    if (!v) return;
+                    await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterModel: v }) });
+                    phraserConfigQuery.refetch?.();
+                    toast({ title: t('common.success'), description: `Model saved: ${v}` });
+                  }} 
+                />
+                <p className="text-xs text-gray-500">
+                  Copy any model ID from OpenRouter. Free models end with ":free" - Paid models require credits.
+                </p>
               </div>
               <div className="flex items-center gap-3">
                 <Label>OpenRouter Key</Label>
@@ -1246,6 +1370,14 @@ export default function AdminDashboard() {
                   <Smartphone className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
                   <span className="hidden sm:inline">Vendors</span>
                 </TabsTrigger>
+                <TabsTrigger value="api-keys" data-testid="tab-api-keys" className="gap-1.5">
+                  <Activity className="h-3.5 w-3.5 text-purple-600 dark:text-purple-400" />
+                  <span className="hidden sm:inline">API Keys</span>
+                </TabsTrigger>
+                <TabsTrigger value="number-pool" data-testid="tab-number-pool" className="gap-1.5">
+                  <Phone className="h-3.5 w-3.5 text-purple-600 dark:text-purple-400" />
+                  <span className="hidden sm:inline">Number Pool</span>
+                </TabsTrigger>
                 <TabsTrigger value="proxies" data-testid="tab-proxies" className="gap-1.5">
                   <Globe className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
                   <span className="hidden sm:inline">Proxies</span>
@@ -1280,6 +1412,10 @@ export default function AdminDashboard() {
                 <div className="w-px h-6 bg-border mx-1 hidden md:block" />
                 
                 {/* System Group */}
+                <TabsTrigger value="system-health" data-testid="tab-system-health" className="gap-1.5">
+                  <HeartPulse className="h-3.5 w-3.5 text-green-600 dark:text-green-400" />
+                  <span className="hidden sm:inline">Health</span>
+                </TabsTrigger>
                 <TabsTrigger value="monitoring" data-testid="tab-monitoring" className="gap-1.5">
                   <Activity className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
                   <span className="hidden sm:inline">Monitor</span>
@@ -1304,6 +1440,79 @@ export default function AdminDashboard() {
             <div>Push: System posts incoming messages to client's configured webhook URL.</div>
             <div>Both: Enable polling and webhook delivery together for redundancy.</div>
           </div>
+
+          {/* Group Credit Allocation Overview */}
+          <Card className="border border-purple-200 dark:border-purple-800 bg-purple-50/50 dark:bg-purple-950/20">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Users className="h-5 w-5 text-purple-600" />
+                Group Credit Allocation Overview
+              </CardTitle>
+              <CardDescription>Track credit pools allocated to each group and their supervisors</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-4">
+                {(() => {
+                  // Group clients by group_id
+                  const groupMap = new Map<string, any[]>();
+                  (clientsData?.clients || []).forEach((client: any) => {
+                    const groupId = client.group_id || null;
+                    if (groupId) {
+                      if (!groupMap.has(groupId)) {
+                        groupMap.set(groupId, []);
+                      }
+                      groupMap.get(groupId)!.push(client);
+                    }
+                  });
+
+                  return Array.from(groupMap.entries()).map(([groupId, groupClients]) => {
+                    // Calculate total credits for this group
+                    const totalCredits = groupClients.reduce((sum, c) => sum + (parseFloat(c.credits) || 0), 0);
+                    const totalMessages = Math.floor(totalCredits);
+                    
+                    // Find supervisors in this group
+                    const supervisors = groupClients.filter(c => c.role === 'supervisor');
+                    const supervisorNames = supervisors.map(s => s.business_name || s.name || s.email).join(', ') || 'None';
+                    
+                    // Get vendor for this group (assume all clients in group use same vendor)
+                    const groupVendor = groupClients[0]?.vendor || vendorBalanceData?.vendorName || 'Unknown';
+
+                    return (
+                      <div key={groupId} className="border rounded-lg p-4 bg-white dark:bg-gray-900">
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                          <div>
+                            <p className="text-xs text-muted-foreground mb-1">Group ID</p>
+                            <p className="font-mono text-sm font-semibold">{groupId}</p>
+                            <p className="text-xs text-purple-600 mt-1">{groupClients.length} client{groupClients.length !== 1 ? 's' : ''}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-muted-foreground mb-1">Total Credits Allocated</p>
+                            <p className="text-lg font-bold text-green-600">{totalCredits.toFixed(2)}</p>
+                            <p className="text-xs text-muted-foreground mt-1">From: {groupVendor}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-muted-foreground mb-1">SMS Capacity</p>
+                            <p className="text-lg font-bold text-blue-600">{totalMessages.toLocaleString()}</p>
+                            <p className="text-xs text-muted-foreground mt-1">messages available</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-muted-foreground mb-1">Supervisors</p>
+                            <p className="text-sm font-medium truncate" title={supervisorNames}>
+                              {supervisorNames}
+                            </p>
+                            <p className="text-xs text-purple-600 mt-1">
+                              {supervisors.length} supervisor{supervisors.length !== 1 ? 's' : ''} of Group: <span className="font-mono font-semibold">{groupId}</span>
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            </CardContent>
+          </Card>
+
           <Card className="border border-border/60">
             <CardHeader>
               <CardTitle>Client Management</CardTitle>
@@ -1645,24 +1854,51 @@ export default function AdminDashboard() {
                 </>
               ) : (
                 <>
-                  <div className="flex items-center gap-3">
-                    <Label>OpenRouter Model</Label>
-                    <select className="border rounded px-2 py-1 text-xs"
-                      defaultValue={phraserConfigQuery.data?.model || 'qwen/qwen3-coder:free'}
-                      onChange={async (e) => {
-                        await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterModel: e.target.value }) });
-                        phraserConfigQuery.refetch?.();
-                        toast({ title: t('common.success'), description: 'Model saved' });
-                      }}>
-                      <option value="qwen/qwen3-coder:free">Qwen3 Coder (free)</option>
-                      <option value="alibaba/tongyi-deepresearch-30b-a3b:free">Tongyi DeepResearch (free)</option>
-                    </select>
-                    <Input placeholder="custom model id" className="w-64" onBlur={async (e) => {
-                      const v = e.target.value.trim(); if (!v) return;
-                      await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterModel: v }) });
-                      phraserConfigQuery.refetch?.();
-                      toast({ title: t('common.success'), description: 'Custom model saved' });
-                    }} />
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-3">
+                      <Label>OpenRouter Model Presets</Label>
+                      <select className="border rounded px-2 py-1 text-xs"
+                        defaultValue={phraserConfigQuery.data?.model || 'qwen/qwen3-coder:free'}
+                        onChange={async (e) => {
+                          await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterModel: e.target.value }) });
+                          phraserConfigQuery.refetch?.();
+                          toast({ title: t('common.success'), description: 'Model saved' });
+                        }}>
+                        <option value="qwen/qwen3-coder:free">Qwen3 Coder (free)</option>
+                        <option value="alibaba/tongyi-deepresearch-30b-a3b:free">Tongyi DeepResearch (free)</option>
+                        <option value="x-ai/grok-2-1212:free">Grok 2 (free)</option>
+                        <option value="google/gemini-2.0-flash-exp:free">Gemini 2.0 Flash (free)</option>
+                        <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B (free)</option>
+                      </select>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Label className="text-sm font-semibold">Custom Model ID</Label>
+                      <a 
+                        href="https://openrouter.ai/models?order=newest" 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="text-xs text-blue-500 hover:text-blue-700 underline"
+                      >
+                        Browse Models →
+                      </a>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Input 
+                        placeholder="e.g., openai/gpt-4o, anthropic/claude-3.5-sonnet" 
+                        className="flex-1 font-mono text-sm" 
+                        defaultValue={phraserConfigQuery.data?.model || ''}
+                        onBlur={async (e) => {
+                          const v = e.target.value.trim(); 
+                          if (!v) return;
+                          await apiRequest('/api/admin/paraphraser/config', { method: 'POST', body: JSON.stringify({ openrouterModel: v }) });
+                          phraserConfigQuery.refetch?.();
+                          toast({ title: t('common.success'), description: `Custom model saved: ${v}` });
+                        }} 
+                      />
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      Copy any model ID from OpenRouter (e.g., "openai/gpt-4o", "anthropic/claude-3.5-sonnet"). Free models end with ":free"
+                    </p>
                   </div>
                   <div className="flex items-center gap-3">
                     <Label>OpenRouter Key</Label>
@@ -1733,6 +1969,10 @@ export default function AdminDashboard() {
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="system-health" className="space-y-4">
+          <SystemHealthDashboard />
         </TabsContent>
 
         <TabsContent value="diagnostics" className="space-y-4">
@@ -1937,7 +2177,7 @@ export default function AdminDashboard() {
                             ))}
                           </SelectContent>
                         </Select>
-                        <Input type="number" step="0.0001" placeholder="Group Extreme Cost" value={groupExtremeCost}
+                        <Input type="number" step="0.0001" placeholder="Group Vendor Cost" value={groupExtremeCost}
                           onChange={(e) => setGroupExtremeCost(e.target.value)} data-testid="input-group-extreme" />
                         <Input type="number" step="0.0001" placeholder="Group Client Rate" value={groupClientRate}
                           onChange={(e) => setGroupClientRate(e.target.value)} data-testid="input-group-rate" />
@@ -1958,6 +2198,49 @@ export default function AdminDashboard() {
                           ${(parseFloat(clientRate || "0") - parseFloat(extremeCost || "0")).toFixed(4)} USD
                         </span>
                       </div>
+                    </div>
+
+                    {/* Profitability Calculator */}
+                    <div className="bg-gradient-to-r from-blue-50 to-green-50 dark:from-blue-950/30 dark:to-green-950/30 rounded-lg p-4 border">
+                      <h4 className="font-semibold mb-3 text-sm">📊 Profitability Calculator</h4>
+                      <div className="flex items-center gap-3 mb-4">
+                        <span className="text-sm">Calculate for</span>
+                        <Input 
+                          type="number" 
+                          className="w-32" 
+                          value={calcSmsCount} 
+                          onChange={(e) => setCalcSmsCount(e.target.value)}
+                          placeholder="SMS count"
+                        />
+                        <span className="text-sm">SMS messages</span>
+                      </div>
+                      {(() => {
+                        const smsCount = parseInt(calcSmsCount || '0') || 0;
+                        const vendorCostNum = parseFloat(extremeCost || '0.01');
+                        const clientRateNum = parseFloat(clientRate || '0.02');
+                        const totalCharged = smsCount * clientRateNum;
+                        const totalReload = smsCount * vendorCostNum;
+                        const profitMargin = totalCharged - totalReload;
+                        return (
+                          <div className="grid grid-cols-3 gap-4 text-center">
+                            <div className="bg-white dark:bg-gray-800 rounded-lg p-3 shadow-sm">
+                              <p className="text-xs text-muted-foreground">Total Charged to Client</p>
+                              <p className="text-xl font-bold text-blue-600">${totalCharged.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                              <p className="text-xs text-muted-foreground">@ ${clientRateNum.toFixed(4)}/SMS</p>
+                            </div>
+                            <div className="bg-white dark:bg-gray-800 rounded-lg p-3 shadow-sm">
+                              <p className="text-xs text-muted-foreground">Vendor Reload Cost</p>
+                              <p className="text-xl font-bold text-orange-600">${totalReload.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                              <p className="text-xs text-muted-foreground">@ ${vendorCostNum.toFixed(4)}/SMS</p>
+                            </div>
+                            <div className="bg-white dark:bg-gray-800 rounded-lg p-3 shadow-sm">
+                              <p className="text-xs text-muted-foreground">Profit Margin</p>
+                              <p className="text-xl font-bold text-green-600">${profitMargin.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                              <p className="text-xs text-muted-foreground">{((profitMargin / totalCharged) * 100 || 0).toFixed(1)}% margin</p>
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
                 )}
@@ -1982,6 +2265,202 @@ export default function AdminDashboard() {
                   )}
                 </div>
               </form>
+            </CardContent>
+          </Card>
+
+          {/* Crypto Wallet Configuration */}
+          <Card className="border border-border/60">
+            <CardHeader>
+              <CardTitle>💰 Crypto Payment Wallets</CardTitle>
+              <CardDescription>Configure wallet addresses for cryptocurrency payments</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="crypto-btc">Bitcoin (BTC) Wallet</Label>
+                    <Input
+                      id="crypto-btc"
+                      type="text"
+                      className="font-mono text-xs"
+                      placeholder="bc1q..."
+                      value={cryptoWallets.btc || ''}
+                      onChange={(e) => setCryptoWallets({...cryptoWallets, btc: e.target.value})}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="crypto-eth">Ethereum (ETH) Wallet</Label>
+                    <Input
+                      id="crypto-eth"
+                      type="text"
+                      className="font-mono text-xs"
+                      placeholder="0x..."
+                      value={cryptoWallets.eth || ''}
+                      onChange={(e) => setCryptoWallets({...cryptoWallets, eth: e.target.value})}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="crypto-usdt-erc20">Tether (USDT) ERC20 Wallet</Label>
+                    <Input
+                      id="crypto-usdt-erc20"
+                      type="text"
+                      className="font-mono text-xs"
+                      placeholder="0x... (Ethereum network)"
+                      value={cryptoWallets.usdt_erc20 || ''}
+                      onChange={(e) => setCryptoWallets({...cryptoWallets, usdt_erc20: e.target.value})}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="crypto-usdt-trc20">Tether (USDT) TRC20 Wallet</Label>
+                    <Input
+                      id="crypto-usdt-trc20"
+                      type="text"
+                      className="font-mono text-xs"
+                      placeholder="T... (TRON network)"
+                      value={cryptoWallets.usdt_trc20 || ''}
+                      onChange={(e) => setCryptoWallets({...cryptoWallets, usdt_trc20: e.target.value})}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="crypto-usdt-bep20">Tether (USDT) BEP20 Wallet</Label>
+                    <Input
+                      id="crypto-usdt-bep20"
+                      type="text"
+                      className="font-mono text-xs"
+                      placeholder="0x... (BSC network)"
+                      value={cryptoWallets.usdt_bep20 || ''}
+                      onChange={(e) => setCryptoWallets({...cryptoWallets, usdt_bep20: e.target.value})}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="crypto-ltc">Litecoin (LTC) Wallet</Label>
+                    <Input
+                      id="crypto-ltc"
+                      type="text"
+                      className="font-mono text-xs"
+                      placeholder="ltc1..."
+                      value={cryptoWallets.ltc || ''}
+                      onChange={(e) => setCryptoWallets({...cryptoWallets, ltc: e.target.value})}
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Button 
+                    onClick={async () => {
+                      try {
+                        await apiRequest('/api/admin/crypto-wallets', {
+                          method: 'POST',
+                          body: JSON.stringify(cryptoWallets)
+                        });
+                        toast({ title: 'Success', description: 'Crypto wallets updated' });
+                        queryClient.invalidateQueries({ queryKey: ['/api/admin/crypto-wallets'] });
+                      } catch (e: any) {
+                        toast({ title: 'Error', description: e?.message || 'Failed to update wallets', variant: 'destructive' });
+                      }
+                    }}
+                  >
+                    Save Wallet Addresses
+                  </Button>
+                  <Button 
+                    variant="outline"
+                    onClick={() => window.open('/crypto-payment', '_blank')}
+                  >
+                    Preview Payment Page
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Users can access the payment page at <code className="bg-muted px-1 py-0.5 rounded">/crypto-payment</code>
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Maintenance Mode */}
+          <Card className="border border-border/60">
+            <CardHeader>
+              <CardTitle>🔧 Maintenance Mode</CardTitle>
+              <CardDescription>Toggle system maintenance status</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center gap-4">
+                <Switch
+                  id="maintenance-mode"
+                  checked={maintenanceMode}
+                  onCheckedChange={async (checked) => {
+                    try {
+                      await apiRequest('/api/admin/maintenance-mode', {
+                        method: 'POST',
+                        body: JSON.stringify({ enabled: checked })
+                      });
+                      setMaintenanceMode(checked);
+                      toast({ 
+                        title: checked ? 'Maintenance Mode Enabled' : 'Maintenance Mode Disabled',
+                        description: checked ? 'System is now in maintenance mode' : 'System is now operational'
+                      });
+                      queryClient.invalidateQueries({ queryKey: ['/api/admin/maintenance-mode'] });
+                    } catch (e: any) {
+                      toast({ title: 'Error', description: e?.message || 'Failed to toggle maintenance mode', variant: 'destructive' });
+                    }
+                  }}
+                />
+                <div className="flex-1">
+                  <Label htmlFor="maintenance-mode" className="cursor-pointer text-base">
+                    {maintenanceMode ? (
+                      <span className="text-orange-600 font-semibold">🟠 System in Maintenance</span>
+                    ) : (
+                      <span className="text-green-600 font-semibold">🟢 System Operational</span>
+                    )}
+                  </Label>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {maintenanceMode 
+                      ? 'Services may be limited while maintenance is active'
+                      : 'All systems operating normally'
+                    }
+                  </p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Support Email Configuration */}
+          <Card className="border border-border/60">
+            <CardHeader>
+              <CardTitle>📧 Support Email</CardTitle>
+              <CardDescription>Configure the support email displayed to users</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div>
+                <Label htmlFor="support-email" className="text-sm font-medium">Support Email Address</Label>
+                <Input
+                  id="support-email"
+                  type="email"
+                  value={supportEmail}
+                  onChange={(e) => setSupportEmail(e.target.value)}
+                  placeholder="ibiki_dash@proton.me"
+                  className="mt-2 font-mono"
+                />
+              </div>
+              <Button
+                onClick={async () => {
+                  try {
+                    await apiRequest('/api/admin/support-email', {
+                      method: 'POST',
+                      body: JSON.stringify({ email: supportEmail })
+                    });
+                    toast({ title: 'Success', description: 'Support email updated successfully' });
+                    queryClient.invalidateQueries({ queryKey: ['/api/admin/support-email'] });
+                    queryClient.invalidateQueries({ queryKey: ['/api/support-email'] });
+                  } catch (e: any) {
+                    toast({ title: 'Error', description: e?.message || 'Failed to update support email', variant: 'destructive' });
+                  }
+                }}
+                className="w-full"
+              >
+                Save Support Email
+              </Button>
+              <p className="text-xs text-muted-foreground">
+                This email will be displayed in the "Contact Support" button in the header.
+              </p>
             </CardContent>
           </Card>
 
@@ -2084,6 +2563,14 @@ export default function AdminDashboard() {
 
         <TabsContent value="sms-vendors" className="space-y-4">
           <SmsVendorManager />
+        </TabsContent>
+
+        <TabsContent value="api-keys" className="space-y-4">
+          <ApiKeyPoolManager />
+        </TabsContent>
+
+        <TabsContent value="number-pool" className="space-y-4">
+          <NumberPoolManager />
         </TabsContent>
 
         <TabsContent value="proxies" className="space-y-4">

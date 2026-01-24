@@ -84,7 +84,7 @@ class SMSQueueManager {
     this.redisConnection = getRedisConnection();
     
     this.queue = new Queue<SMSJobData, SMSJobResult>(QUEUE_NAME, {
-      connection: this.redisConnection,
+      connection: this.redisConnection as any,
       defaultJobOptions: {
         attempts: 3,
         backoff: {
@@ -102,7 +102,7 @@ class SMSQueueManager {
     });
 
     this.queueEvents = new QueueEvents(QUEUE_NAME, {
-      connection: getRedisConnection(),
+      connection: getRedisConnection() as any,
     });
 
     // Start batch write interval (every 500ms)
@@ -184,7 +184,7 @@ class SMSQueueManager {
         }
       },
       {
-        connection: getRedisConnection(),
+        connection: getRedisConnection() as any,
         concurrency,
         // Rate limiting: max 200 jobs per second (adjust based on vendor limits)
         limiter: {

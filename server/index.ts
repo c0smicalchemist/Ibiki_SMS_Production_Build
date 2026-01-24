@@ -1,4 +1,5 @@
 import "./env";
+import { env } from "./env";
 
 // CRITICAL: Verify DATABASE_URL is set
 if (!process.env.DATABASE_URL) {
@@ -63,8 +64,24 @@ function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
+// Get the directory name for both ESM and CJS
+const getDirname = () => {
+  try {
+    // ESM: use import.meta.dirname
+    if (typeof import.meta?.dirname === 'string') {
+      return import.meta.dirname;
+    }
+  } catch {}
+  // CJS fallback: use __dirname or process.cwd()
+  if (typeof __dirname === 'string') {
+    return __dirname;
+  }
+  return process.cwd();
+};
+
 function serveStatic(app: express.Express) {
-  const distPath = path.resolve(import.meta.dirname, "..", "dist", "public");
+  const currentDir = getDirname();
+  const distPath = path.resolve(currentDir, "..", "dist", "public");
   const exists = fs.existsSync(distPath);
   if (!exists) {
     console.warn(`Skipping static file serving; missing ${distPath}`);
@@ -268,6 +285,10 @@ app.use((req, res, next) => {
           await exec(`CREATE INDEX IF NOT EXISTS message_id_idx ON message_logs(message_id)`);
           await exec(`CREATE INDEX IF NOT EXISTS message_sender_phone_idx ON message_logs(sender_phone_number)`);
           await exec(`CREATE INDEX IF NOT EXISTS message_is_example_idx ON message_logs(is_example)`);
+          // Unique constraint to prevent duplicate message logs (idempotency)
+          await exec(`CREATE UNIQUE INDEX IF NOT EXISTS message_logs_message_id_unique_idx ON message_logs(message_id)`);
+          // Unique constraint to prevent duplicate credit transactions per message log
+          await exec(`CREATE UNIQUE INDEX IF NOT EXISTS credit_tx_message_log_unique_idx ON credit_transactions(message_log_id) WHERE message_log_id IS NOT NULL`);
 
           await exec(`CREATE TABLE IF NOT EXISTS credit_transactions (
             id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -428,16 +449,12 @@ app.use((req, res, next) => {
   
   console.log('🚀 Starting server...');
   console.log(`🌐 Port: ${port}`);
-  console.log(`🏠 Host: 0.0.0.0`);
+  console.log(`🏠 Host: localhost`);
   console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
   
-  server.listen({
-    port,
-    host: "0.0.0.0",
-    reusePort: true,
-  }, () => {
+  server.listen(port, () => {
     console.log('✅ Server started successfully!');
-    console.log(`✅ Listening on http://0.0.0.0:${port}`);
+    console.log(`✅ Listening on http://localhost:${port}`);
     console.log('✅ Health check available at /api/health');
     log(`serving on port ${port}`);
   });
@@ -447,6 +464,48 @@ app.use((req, res, next) => {
     console.error('❌ Server startup error:', error);
     process.exit(1);
   });
+
+  // Schedule a daily reset of counters (run at startup and every midnight)
+  const shouldRunDailyTasks = process.env.RUN_DAILY_TASKS !== 'false' && (typeof process.env.NODE_APP_INSTANCE === 'undefined' || process.env.NODE_APP_INSTANCE === '0');
+  if (shouldRunDailyTasks) {
+    const runResetOnce = async () => {
+      try {
+        if (!process.env.DATABASE_URL) return;
+        const { Pool } = await import('pg');
+        const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+        try {
+          await pool.query('SELECT reset_daily_counters()');
+          console.log('[DailyReset] reset_daily_counters() invoked successfully');
+        } catch (e: any) {
+          console.warn('[DailyReset] Failed to run reset_daily_counters():', e?.message || e);
+        } finally {
+          await pool.end();
+        }
+      } catch (err: any) {
+        console.warn('[DailyReset] Unexpected error while running reset:', err?.message || err);
+      }
+    };
+
+    const msUntilNextMidnight = () => {
+      const now = new Date();
+      const next = new Date(now);
+      next.setHours(24, 0, 0, 0);
+      return next.getTime() - now.getTime();
+    };
+
+    // Run once at startup
+    runResetOnce().catch(() => {});
+
+    // Schedule for local midnight then every 24h
+    const delay = msUntilNextMidnight();
+    setTimeout(() => {
+      runResetOnce().catch(() => {});
+      setInterval(() => runResetOnce().catch(() => {}), 24 * 60 * 60 * 1000);
+    }, delay);
+    console.log('[DailyReset] Scheduled daily reset task (runs at local midnight)');
+  } else {
+    console.log('[DailyReset] Daily reset task disabled by RUN_DAILY_TASKS env or non-primary instance');
+  }
 
 })().catch((error) => {
   console.error('❌ Application startup failed:', error);

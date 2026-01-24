@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Trash2, Star } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Inbox as InboxIcon, MessageSquare, ArrowLeft } from "lucide-react";
+import { Inbox as InboxIcon, MessageSquare, ArrowLeft, RotateCcw } from "lucide-react";
 import { Link } from "wouter";
 import { format } from "date-fns";
 import { AdminModeBar } from "@/components/AdminModeBar";
@@ -307,6 +307,13 @@ export default function Inbox() {
     return acc;
   }, {});
 
+  // Count unique conversations (filtered by favorites if needed)
+  const conversationCount = Object.entries(groupedMessages).filter(([phone, msgs]: any[]) => {
+    const isFav = favorites.includes(String(phone));
+    if (viewFavorites && !isFav) return false;
+    return true;
+  }).length;
+
   return (
     <div className="min-h-screen bg-background">
       <DashboardHeader />
@@ -363,9 +370,9 @@ export default function Inbox() {
                       <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t('inbox.search')} className="w-full" />
                     </div>
                     <div className="flex items-center gap-1.5 ml-auto">
-                      <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
-                        <span className="text-lg font-semibold text-slate-700 dark:text-slate-200">{messages.length.toLocaleString()}</span>
-                        <span className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">{t('inbox.indicator.all')}</span>
+                      <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700">
+                        <span className="text-lg font-semibold text-slate-700 dark:text-slate-300">{conversationCount.toLocaleString()}</span>
+                        <span className="text-xs font-medium text-slate-600 dark:text-slate-400 uppercase tracking-wide">{t('inbox.indicator.all')}</span>
                       </div>
                       <UnreadIndicator userId={effectiveUserId} isAdmin={isAdmin} />
                     </div>
@@ -373,23 +380,34 @@ export default function Inbox() {
                 </CardHeader>
                 <CardContent className="p-0">
                   <div className="flex items-center gap-2 px-4 py-2 border-b bg-muted/30">
-                    <Button
-                      size="sm"
-                      onClick={() => setViewFavorites(v => !v)}
-                      className={`h-7 px-3 ${viewFavorites ? 'bg-yellow-100 text-yellow-800 border-yellow-400 hover:bg-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-700' : ''}`}
-                      variant="outline"
-                    >
-                      <Star className={`h-3.5 w-3.5 ${viewFavorites ? 'fill-yellow-500 text-yellow-600' : ''}`} />
-                      <span className="ml-1">{t('inbox.favorites')}</span>
-                    </Button>
+                    {!showDeleted && (
+                      <Button
+                        size="sm"
+                        onClick={() => setViewFavorites(v => !v)}
+                        className={`h-7 px-3 ${viewFavorites ? 'bg-yellow-100 text-yellow-800 border-yellow-400 hover:bg-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-700' : ''}`}
+                        variant="outline"
+                      >
+                        <Star className={`h-3.5 w-3.5 ${viewFavorites ? 'fill-yellow-500 text-yellow-600' : ''}`} />
+                        <span className="ml-1">{t('inbox.favorites')}</span>
+                      </Button>
+                    )}
                     <Button
                       size="sm"
                       onClick={() => setShowDeleted(d => !d)}
                       className={`h-7 px-3 ${showDeleted ? 'bg-red-100 text-red-700 border-red-400 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-300 dark:border-red-700' : ''}`}
                       variant="outline"
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      <span className="ml-1">Deleted</span>
+                      {showDeleted ? (
+                        <>
+                          <ArrowLeft className="h-3.5 w-3.5" />
+                          <span className="ml-1">Back to Inbox</span>
+                        </>
+                      ) : (
+                        <>
+                          <Trash2 className="h-3.5 w-3.5" />
+                          <span className="ml-1">Deleted</span>
+                        </>
+                      )}
                     </Button>
                     {showDeleted && (
                       <Button
@@ -447,7 +465,24 @@ export default function Inbox() {
                       })
                       .map(([phone, msgs]: any[], index: number) => {
                         const latest = (msgs as any[]).slice().sort((a: any, b: any) => new Date((b.timestamp||b.createdAt)).getTime() - new Date((a.timestamp||a.createdAt)).getTime())[0];
-                        const dt = new Date((latest as any).timestamp || (latest as any).createdAt);
+                        
+                        // Find the most recent outbound message to this phone number
+                        const outboundToPhone = (logsData?.messages || [])
+                          .filter((log: any) => {
+                            const recips = Array.isArray(log?.recipients) ? log.recipients : (log?.recipient ? [log.recipient] : []);
+                            return recips.some((r: any) => String(r) === String(phone));
+                          })
+                          .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+                        
+                        // Determine which message is more recent (inbound or outbound)
+                        const latestInboundTime = new Date((latest as any).timestamp || (latest as any).createdAt).getTime();
+                        const latestOutboundTime = outboundToPhone ? new Date(outboundToPhone.createdAt).getTime() : 0;
+                        
+                        const mostRecentMessage = latestOutboundTime > latestInboundTime && outboundToPhone
+                          ? { message: outboundToPhone.message, timestamp: outboundToPhone.createdAt, isOutbound: true }
+                          : { message: (latest as any).message, timestamp: (latest as any).timestamp || (latest as any).createdAt, isOutbound: false };
+                        
+                        const dt = new Date(mostRecentMessage.timestamp);
                         const hasUnread = (msgs as any[]).some((m: any) => !m.isRead);
                         const isBlacklisted = (msgs as any[]).some((m: any) => /blacklist|blocked/i.test(String(m.status||'')) || !!m.matchedBlockWord);
                         const isFavorite = favorites.includes(String(phone));
@@ -476,7 +511,12 @@ export default function Inbox() {
                               </div>
                               <span className="text-[11px] text-muted-foreground whitespace-nowrap">{format(dt, 'MMM d, HH:mm')}</span>
                             </div>
-                            <div className="text-xs text-muted-foreground mt-1 truncate">{(latest as any).message}</div>
+                            <div className="flex items-start gap-1.5 mt-1">
+                              {mostRecentMessage.isOutbound && (
+                                <span className="text-[10px] text-blue-600 dark:text-blue-400 font-semibold mt-0.5 flex-shrink-0">You:</span>
+                              )}
+                              <div className="text-xs text-muted-foreground truncate flex-1">{mostRecentMessage.message}</div>
+                            </div>
                           </div>
                         );
                       })}
@@ -494,44 +534,89 @@ export default function Inbox() {
                         <div>{t('inbox.from')}: <span className="font-mono">{selectedPhoneNumber || '-'}</span></div>
                       </div>
                       <div className="flex items-center gap-2 flex-wrap justify-end">
-                      {/* Save selected conversation to favourites (header star) */}
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        title="Save to favourites"
-                        disabled={!selectedPhoneNumber}
-                        onClick={() => {
-                          if (!selectedPhoneNumber) return;
-                          const fav = favorites.includes(selectedPhoneNumber);
-                          toggleFavoriteMutation.mutate({ phoneNumber: selectedPhoneNumber, favorite: !fav });
-                        }}
-                      >
-                        <Star className={`h-4 w-4 ${selectedPhoneNumber && favorites.includes(selectedPhoneNumber) ? 'text-yellow-600 fill-yellow-500' : ''}`} />
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        title="Delete conversation"
-                        disabled={!selectedPhoneNumber}
-                        onClick={async () => {
-                          if (!selectedPhoneNumber) return;
-                          try {
-                            const token = localStorage.getItem('token');
-                            const body: any = { phoneNumber: selectedPhoneNumber };
-                            if (effectiveUserId) body.userId = effectiveUserId;
-                            await fetch('/api/web/inbox/delete-conversation', {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
-                              body: JSON.stringify(body)
-                            });
-                          } catch {}
-                          await queryClient.invalidateQueries({ queryKey: ["/api/web/inbox", effectiveUserId] });
-                          await queryClient.invalidateQueries({ queryKey: ["/api/web/inbox/deleted", effectiveUserId] });
-                          setSelectedPhoneNumber(null);
-                        }}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                      {/* Save selected conversation to favourites (header star) - only show when NOT in deleted view */}
+                      {!showDeleted && (
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          title="Save to favourites"
+                          disabled={!selectedPhoneNumber}
+                          onClick={() => {
+                            if (!selectedPhoneNumber) return;
+                            const fav = favorites.includes(selectedPhoneNumber);
+                            toggleFavoriteMutation.mutate({ phoneNumber: selectedPhoneNumber, favorite: !fav });
+                          }}
+                        >
+                          <Star className={`h-4 w-4 ${selectedPhoneNumber && favorites.includes(selectedPhoneNumber) ? 'text-yellow-600 fill-yellow-500' : ''}`} />
+                        </Button>
+                      )}
+                      {/* Show restore button when in deleted view, delete button otherwise */}
+                      {showDeleted ? (
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          title="Restore conversation"
+                          disabled={!selectedPhoneNumber}
+                          className="text-green-600 hover:text-green-700 hover:bg-green-50 dark:text-green-500 dark:hover:bg-green-950"
+                          onClick={async () => {
+                            if (!selectedPhoneNumber) return;
+                            try {
+                              const token = localStorage.getItem('token');
+                              const body: any = { phoneNumber: selectedPhoneNumber };
+                              if (effectiveUserId) body.userId = effectiveUserId;
+                              const resp = await fetch('/api/web/inbox/restore-conversation', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+                                body: JSON.stringify(body)
+                              });
+                              if (resp.ok) {
+                                toast({ title: t('common.success'), description: 'Conversation restored successfully' });
+                              } else {
+                                throw new Error('Failed to restore');
+                              }
+                            } catch (e) {
+                              toast({ title: t('common.error'), description: 'Failed to restore conversation', variant: 'destructive' });
+                            }
+                            await queryClient.invalidateQueries({ queryKey: ["/api/web/inbox", effectiveUserId] });
+                            await queryClient.invalidateQueries({ queryKey: ["/api/web/inbox/deleted", effectiveUserId] });
+                            setSelectedPhoneNumber(null);
+                          }}
+                        >
+                          <RotateCcw className="h-4 w-4 text-green-600 dark:text-green-500" />
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          title="Delete conversation"
+                          disabled={!selectedPhoneNumber}
+                          onClick={async () => {
+                            if (!selectedPhoneNumber) return;
+                            try {
+                              const token = localStorage.getItem('token');
+                              const body: any = { phoneNumber: selectedPhoneNumber };
+                              if (effectiveUserId) body.userId = effectiveUserId;
+                              const resp = await fetch('/api/web/inbox/delete-conversation', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+                                body: JSON.stringify(body)
+                              });
+                              if (resp.ok) {
+                                toast({ title: t('common.success'), description: 'Conversation deleted successfully' });
+                              } else {
+                                throw new Error('Failed to delete');
+                              }
+                            } catch (e) {
+                              toast({ title: t('common.error'), description: 'Failed to delete conversation', variant: 'destructive' });
+                            }
+                            await queryClient.invalidateQueries({ queryKey: ["/api/web/inbox", effectiveUserId] });
+                            await queryClient.invalidateQueries({ queryKey: ["/api/web/inbox/deleted", effectiveUserId] });
+                            setSelectedPhoneNumber(null);
+                          }}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      )}
                     </div>
                   </div>
                 </CardHeader>
@@ -578,7 +663,7 @@ function UnreadIndicator({ userId, isAdmin }: { userId?: string; isAdmin?: boole
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-blue-600 dark:bg-blue-700 border border-blue-500 dark:border-blue-600">
       <span className="text-lg font-semibold text-white">{count.toLocaleString()}</span>
-      <span className="text-xs font-medium text-blue-100 uppercase tracking-wide">{t('inbox.unreadIndicator')}</span>
+      <span className="text-xs font-medium text-white uppercase tracking-wide">{t('inbox.unreadIndicator')}</span>
     </div>
   );
 }

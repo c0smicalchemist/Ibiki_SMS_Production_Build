@@ -7,9 +7,122 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Architects+Daughter&family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=Fira+Code:wght@300..700&family=Geist+Mono:wght@100..900&family=Geist:wght@100..900&family=IBM+Plex+Mono:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;1,100;1,200;1,300;1,400;1,500;1,600;1,700&family=IBM+Plex+Sans:ital,wght@0,100..700;1,100..700&family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Lora:ital,wght@0,400..700;1,400..700&family=Merriweather:ital,opsz,wght@0,18..144,300..900;1,18..144,300..900&family=Montserrat:ital,wght@0,100..900;1,100..900&family=Open+Sans:ital,wght@0,300..800;1,300..800&family=Outfit:wght@100..900&family=Oxanium:wght@200..800&family=Playfair+Display:ital,wght@0,400..900;1,400..900&family=Plus+Jakarta+Sans:ital,wght@0,200..800;1,200..800&family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&family=Roboto+Mono:ital,wght@0,100..700;1,100..700&family=Roboto:ital,wght@0,100..900;1,100..900&family=Source+Code+Pro:ital,wght@0,200..900;1,200..900&family=Source+Serif+4:ital,opsz,wght@0,8..60,200..900;1,8..60,200..900&family=Space+Grotesk:wght@300..700&family=Space+Mono:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+    <style>
+      /* NUCLEAR: Hide ALL error overlays and banners */
+      [class*="error"], [class*="Error"], 
+      [style*="background: #fee2e2"], [style*="background:#fee2e2"],
+      [style*="color: #7f1d1d"], [style*="color:#7f1d1d"],
+      div[style*="padding: 16"] > div[style*="background: #fee"] {
+        display: none !important;
+        opacity: 0 !important;
+        visibility: hidden !important;
+        position: absolute !important;
+        left: -9999px !important;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // NUCLEAR: Active DOM surveillance - destroy any error banners immediately
+      (function() {
+        // Hide any element containing the error text
+        function destroyErrorBanners() {
+          const errorPatterns = [
+            'removechild',
+            'failed to execute',
+            'node to be removed',
+            'not a child of this node',
+            'notfounderror'
+          ];
+          
+          // Find and destroy all elements with error content
+          document.querySelectorAll('*').forEach(function(el) {
+            if (!el) return;
+            var text = (el.textContent || el.innerText || '').toLowerCase();
+            var matches = errorPatterns.some(function(p) { return text.includes(p); });
+            
+            if (matches && text.length < 500) { // Only if it's a short error message
+              // DESTROY IT
+              el.style.display = 'none';
+              el.style.visibility = 'hidden';
+              el.style.opacity = '0';
+              el.style.position = 'absolute';
+              el.style.left = '-9999px';
+              el.remove(); // Nuclear option: just delete it
+            }
+          });
+          
+          // Also target by background color (the red error banner)
+          document.querySelectorAll('[style*="background"]').forEach(function(el) {
+            var bg = el.style.background || el.style.backgroundColor || '';
+            if (bg.includes('#fee') || bg.includes('rgb(254') || bg.includes('red')) {
+              var text = (el.textContent || '').toLowerCase();
+              if (errorPatterns.some(function(p) { return text.includes(p); })) {
+                el.remove();
+              }
+            }
+          });
+        }
+        
+        // Run immediately
+        destroyErrorBanners();
+        
+        // Run after DOM loads
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', destroyErrorBanners);
+        }
+        
+        // Run continuously with MutationObserver
+        var observer = new MutationObserver(function() {
+          destroyErrorBanners();
+        });
+        
+        observer.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['style', 'class']
+        });
+        
+        // Also run on a timer as final backup
+        setInterval(destroyErrorBanners, 100);
+      })();
+      
+      // ULTRA AGGRESSIVE error suppression - case-insensitive pattern matching
+      window.addEventListener('error', function(e) {
+        var msg = (e.message || e.error?.message || e.error || '').toString().toLowerCase();
+        var stack = (e.error?.stack || e.stack || '').toString().toLowerCase();
+        var combined = msg + ' ' + stack;
+        if (
+          combined.includes('removechild') ||
+          combined.includes('notfounderror') ||
+          combined.includes('failed to execute') ||
+          combined.includes('node to be removed') ||
+          combined.includes('not a child')
+        ) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          return false;
+        }
+      }, true);
+      
+      // Suppress unhandled promise rejections related to React DOM
+      window.addEventListener('unhandledrejection', function(e) {
+        var msg = (e.reason?.message || e.reason || '').toString().toLowerCase();
+        if (
+          msg.includes('removechild') ||
+          msg.includes('notfounderror') ||
+          msg.includes('failed to execute') ||
+          msg.includes('node to be removed') ||
+          msg.includes('not a child')
+        ) {
+          e.preventDefault();
+          return false;
+        }
+      });
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

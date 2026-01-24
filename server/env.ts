@@ -3,7 +3,7 @@ import path from "path";
 import { z } from "zod";
 
 // Load environment variables immediately
-const envFile = process.env.NODE_ENV === 'production' ? '.env.production' : '.env.development';
+const envFile = process.env.NODE_ENV?.trim() === 'production' ? '.env.production' : '.env.development';
 dotenv.config({ path: envFile });
 // Fallback to .env
 dotenv.config();
@@ -48,6 +48,11 @@ type Environment = z.infer<typeof envSchema>;
  * Validate and parse environment variables with strict production checks
  */
 function validateEnv(): Environment {
+  // Trim NODE_ENV to handle Windows set command issues
+  if (process.env.NODE_ENV) {
+    process.env.NODE_ENV = process.env.NODE_ENV.trim();
+  }
+  
   const result = envSchema.safeParse(process.env);
 
   if (!result.success) {

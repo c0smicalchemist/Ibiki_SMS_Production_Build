@@ -5,7 +5,7 @@ import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { useQuery } from "@tanstack/react-query";
 import { useLanguage } from "@/contexts/LanguageContext";
-import { LogOut, RefreshCcw, Send, Inbox as InboxIcon, Users, List, HelpCircle } from "lucide-react";
+import { LogOut, RefreshCcw, Send, Inbox as InboxIcon, Users, List, HelpCircle, Mail } from "lucide-react";
 import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import logoUrl from "@assets/Yubin_Dash_NOBG_1763476645991.png";
 import { queryClient } from "@/lib/queryClient";
@@ -25,12 +25,20 @@ export function DashboardHeader() {
     user: { id: string; email: string; name: string; company: string | null; role: string };
   }>({ queryKey: ['/api/client/profile'] });
 
-  const { data: balanceData } = useQuery<{ success: boolean; balance: number; currency: string }>({
+  const { data: balanceData } = useQuery<{ success: boolean; balance: number; currency: string }>({ 
     queryKey: ['/api/web/account/balance'],
-    staleTime: 10000,
+    staleTime: 0,
   });
 
-  // Fetch route override status
+  const { data: supportEmailData } = useQuery<{ email: string }>({
+    queryKey: ['/api/support-email'],
+    staleTime: 30000,
+  });
+
+  // For admins, show vendor-specific credits; for others, show generic credits
+  // This ensures header matches the credits shown in client management
+  const displayCredits = typeof balanceData?.balance === 'number' ? balanceData.balance : null;
+
   const { data: configData } = useQuery<{ config: Record<string, string> }>({
     queryKey: ['/api/admin/config'],
     staleTime: 30000,
@@ -142,13 +150,17 @@ export function DashboardHeader() {
   useEffect(() => {
     const calc = () => {
       try {
-        const pst = getHourInZone('America/Los_Angeles');
-        const est = getHourInZone('America/New_York');
-        const afterPst9 = pst.hour >= 9;
-        const beforeEst20 = est.hour < 20;
-        const open = afterPst9 && beforeEst20;
+        // Route hours: 8:00 AM PST (GMT-8) to 6:00 PM PST (9:00 PM EST)
+        // We use PST only to simplify - 6 PM PST = 9 PM EST
+        const pst = getHourInZone('America/Los_Angeles'); // GMT-8
+        const pstHour = pst.hour;
+        
+        // Open from 8:00 AM PST (hour >= 8) until 6:00 PM PST (hour < 18)
+        const open = pstHour >= 8 && pstHour < 18;
         setRoutesOpen(open);
-        const next = open ? secondsUntil('America/New_York', 20, 0) : secondsUntil('America/Los_Angeles', 9, 0);
+        
+        // Countdown: if open, countdown to 6 PM PST (close); if closed, countdown to 8 AM PST (open)
+        const next = open ? secondsUntil('America/Los_Angeles', 18, 0) : secondsUntil('America/Los_Angeles', 8, 0);
         setCountdown(next);
       } catch (e) {
         console.error("Timer error:", e);
@@ -184,25 +196,38 @@ export function DashboardHeader() {
           <div className="flex items-center gap-3 whitespace-nowrap" data-testid="routes-status">
             {routesOpen ? (
               <div className="flex items-center gap-3">
-                <span className="text-xs md:text-sm font-semibold text-green-600">{t('status.routesOpen') || 'Routes Open'} (9:00AM GMT-8)</span>
+                <span className="text-xs md:text-sm font-semibold text-green-600">Route Status: Open</span>
                 <span className="text-xs text-muted-foreground hidden sm:inline">{t('status.closesIn') || 'Closes in'}: {formatHMS(countdown)}</span>
               </div>
             ) : (
               <div className="flex items-center gap-3">
-                <span className={`text-xs md:text-sm font-semibold ${routeOverrideEnabled ? 'text-orange-600' : 'text-red-600'}`}>
-                  {t('status.routesClosed') || 'Routes Closed'} (8:00PM GMT-5)
-                  {routeOverrideEnabled && <span className="ml-1">- Route Override</span>}
+                <span className={`text-xs md:text-sm font-semibold ${routeOverrideEnabled ? 'text-amber-600' : 'text-red-600'}`}>
+                  {routeOverrideEnabled ? 'Route Status: Overridden' : 'Route Status: Closed'}
                 </span>
                 <Dialog>
                   <DialogTrigger asChild>
-                    <Button variant="ghost" size="icon" className={`${routeOverrideEnabled ? 'text-orange-600' : 'text-red-600'} h-6 w-6`} aria-label="Routes Closed help">
+                    <Button variant="ghost" size="icon" className={`${routeOverrideEnabled ? 'text-amber-600 hover:text-amber-700' : 'text-red-600 hover:text-red-700'} h-6 w-6`} aria-label="Routes Status help">
                       <HelpCircle className="h-4 w-4" />
                     </Button>
                   </DialogTrigger>
                   <DialogContent>
                     <DialogHeader>
-                      <DialogTitle>{t('admin.systemStatus.help.title') || 'System Status Help'}</DialogTitle>
-                      <DialogDescription>{t('admin.systemStatus.help.description') || 'Routes are open from 9:00 AM PST to 8:00 PM EST.'}</DialogDescription>
+                      <DialogTitle>Route Status Information</DialogTitle>
+                      <DialogDescription className="space-y-3">
+                        <p><strong>Route Hours:</strong> Open from 8:00 AM PST to 6:00 PM PST (9:00 PM EST).</p>
+                        {routeOverrideEnabled ? (
+                          <p className="text-amber-600"><strong>Route Override Active:</strong> Admin/Supervisor single SMS allowed outside route hours.</p>
+                        ) : (
+                          <>
+                            <p><strong>When Routes Are Closed:</strong></p>
+                            <ul className="list-disc pl-5 space-y-1">
+                              <li>❌ Cannot send SMS to NEW customers</li>
+                              <li>✅ CAN reply to customers who have already replied to your initial SMS</li>
+                              <li>Admin/Supervisor can enable Route Override to allow single SMS sends</li>
+                            </ul>
+                          </>
+                        )}
+                      </DialogDescription>
                     </DialogHeader>
                   </DialogContent>
                 </Dialog>
@@ -213,7 +238,7 @@ export function DashboardHeader() {
           {profile?.user?.name && (
             <Badge variant="secondary" data-testid="badge-username">
               {profile.user.name}
-              {typeof balanceData?.balance === 'number' ? ` · Credits ${balanceData.balance.toFixed(2)}` : ''}
+              {displayCredits !== null ? ` · Credits ${displayCredits.toLocaleString()}` : ''}
             </Badge>
           )}
           {profile?.user?.role && (
@@ -223,12 +248,45 @@ export function DashboardHeader() {
           )}
           <ThemeToggle />
           <LanguageToggle />
+          <Dialog>
+            <DialogTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex items-center gap-2"
+              >
+                <Mail className="h-4 w-4" />
+                Contact Support
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Contact Support</DialogTitle>
+                <DialogDescription className="space-y-3">
+                  <p>Need help? Reach out to our support team:</p>
+                  <div className="flex items-center gap-2 p-3 bg-muted rounded-md">
+                    <Mail className="h-4 w-4" />
+                    <a 
+                      href={`mailto:${supportEmailData?.email || 'ibiki_dash@proton.me'}`}
+                      className="font-mono text-sm text-blue-600 hover:underline"
+                    >
+                      {supportEmailData?.email || 'ibiki_dash@proton.me'}
+                    </a>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Our team will respond to your inquiry as soon as possible.
+                  </p>
+                </DialogDescription>
+              </DialogHeader>
+            </DialogContent>
+          </Dialog>
           {/* Retrieve Inbox action moved into Inbox page header */}
           <Button
             variant="ghost"
             size="sm"
             onClick={handleForceRefresh}
             data-testid="button-refresh"
+            className="text-green-600 hover:text-green-700 hover:bg-green-50"
           >
             <RefreshCcw className={`mr-2 h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
             {refreshing ? 'Refreshing…' : 'Refresh'}

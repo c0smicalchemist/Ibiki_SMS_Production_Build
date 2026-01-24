@@ -4,7 +4,7 @@ import { z } from 'zod';
 export const BaseVendorConfigSchema = z.object({
   id: z.string(),
   name: z.string(),
-  type: z.enum(['textbelt', 'extremesms', 'twilio', 'vonage', 'custom']),
+  type: z.enum(['textbelt', 'extremesms', 'twilio', 'vonage', 'anveo', 'custom']),
   enabled: z.boolean().default(true),
   priority: z.number().min(1).max(100).default(50),
   timeout: z.number().min(1000).max(60000).default(10000),
@@ -32,6 +32,16 @@ export const ExtremeSMSConfigSchema = BaseVendorConfigSchema.extend({
     route: z.enum(['1', '2', '3', '4', '5']).default('4'),
     unicode: z.boolean().default(false),
     flash: z.boolean().default(false),
+  }),
+});
+
+export const AnveoConfigSchema = BaseVendorConfigSchema.extend({
+  type: z.literal('anveo'),
+  config: z.object({
+    apiKey: z.string(),
+    baseUrl: z.string().url('Invalid URL format').default('https://www.anveo.com/api/v1.asp'),
+    fromNumber: z.string().optional(),
+    rateLimit: z.number().min(1).max(1000).default(60), // requests per minute
   }),
 });
 
@@ -74,6 +84,7 @@ export const CustomVendorConfigSchema = BaseVendorConfigSchema.extend({
 export const VendorConfigSchema = z.discriminatedUnion('type', [
   TextBeltConfigSchema,
   ExtremeSMSConfigSchema,
+  AnveoConfigSchema,
   TwilioConfigSchema,
   VonageConfigSchema,
   CustomVendorConfigSchema,
@@ -164,6 +175,19 @@ export const DEFAULT_VENDOR_CONFIGS = {
       route: '4',
       unicode: false,
       flash: false,
+    },
+  },
+  anveo: {
+    id: 'anveo',
+    name: 'Anveo',
+    type: 'anveo' as const,
+    enabled: true,
+    priority: 1,
+    config: {
+      apiKey: process.env.ANVEO_API_KEY || '',
+      baseUrl: 'https://www.anveo.com/api/v1.asp',
+      fromNumber: process.env.ANVEO_FROM_NUMBER || '',
+      rateLimit: 60,
     },
   },
 } as const;

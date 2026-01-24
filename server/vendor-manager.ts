@@ -40,7 +40,12 @@ export class VendorManager {
 
     this.initPromise = (async () => {
       try {
-        const configData = await storage.getSystemConfig('vendor_management');
+        let configData;
+        try {
+          configData = await storage.getSystemConfig('vendor_management');
+        } catch (e) {
+          console.warn('⚠️ Could not load vendor config from DB, falling back to defaults:', e);
+        }
       
       if (configData?.value) {
         try {
@@ -53,9 +58,18 @@ export class VendorManager {
       }
       
       if (!this.config) {
+        // Check for active vendor from system_config
+        let activeVendorId = 'anveo'; // Default to Anveo as requested
+        try {
+          const activeVendorConfig = await storage.getSystemConfig('active_sms_vendor');
+          activeVendorId = activeVendorConfig?.value || 'anveo';
+        } catch (e) {
+          console.warn('⚠️ Could not load active vendor from DB, using Anveo as default:', e);
+        }
+        
         // Initialize with default configuration
         this.config = {
-          activeVendorId: 'textbelt',
+          activeVendorId,
           vendors: Object.values(DEFAULT_VENDOR_CONFIGS),
           switchingConfig: {
             strategy: 'manual',
@@ -71,7 +85,11 @@ export class VendorManager {
           updatedAt: new Date(),
         };
         
-        await this.saveConfig();
+        try {
+          await this.saveConfig();
+        } catch (e) {
+          console.warn('⚠️ Could not save vendor config to DB, continuing with in-memory config:', e);
+        }
       }
 
       // Initialize vendor states
@@ -82,9 +100,27 @@ export class VendorManager {
         this.startHealthChecks();
       }
     } catch (error) {
-      console.error('Failed to initialize vendor manager:', error);
-      this.initPromise = null;
-      throw error;
+      console.error('Failed to initialize vendor manager, continuing with defaults:', error);
+      // Ensure we have a basic config even if everything failed
+      if (!this.config) {
+        this.config = {
+          activeVendorId: 'anveo',
+          vendors: Object.values(DEFAULT_VENDOR_CONFIGS),
+          switchingConfig: {
+            strategy: 'manual',
+            fallbackEnabled: true,
+            healthCheckInterval: 30000,
+            failureThreshold: 3,
+            recoveryTime: 300000,
+            costOptimization: false,
+            regionBased: false,
+          },
+          vendorStates: {},
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+      }
+      // Don't throw error, continue with fallback config
     }
     })();
     return this.initPromise;
@@ -395,7 +431,11 @@ export class VendorManager {
       }
     }
 
-    await this.saveConfig();
+    try {
+      await this.saveConfig();
+    } catch (e) {
+      console.warn('⚠️ Could not save vendor states to DB, continuing with in-memory config:', e);
+    }
   }
 
   /**
@@ -448,6 +488,8 @@ export class VendorManager {
           return await this.getTwilioBalance(vendor.config);
         case 'vonage':
           return await this.getVonageBalance(vendor.config);
+        case 'anveo':
+          return await this.getAnveoBalance(vendor.config);
         default:
           return null;
       }
@@ -471,6 +513,53 @@ export class VendorManager {
 
   private async getTextBeltBalance(config: any): Promise<number | null> {
     try {
+      // Check if API key pooling is being used
+      const { apiKeyPool } = await import('./api-key-pool');
+      const activeKeys = (await import('./storage')).storage.getActiveApiKeys ? 
+        await (await import('./storage')).storage.getActiveApiKeys('textbelt') : [];
+      
+      if (activeKeys && activeKeys.length > 0) {
+        // Sum balance from all active pooled API keys
+        let totalBalance = 0;
+        let successCount = 0;
+        
+        for (const key of activeKeys) {
+          try {
+            // Use api_key (snake_case) as returned by database
+            const apiKey = key.apiKey || key.api_key;
+            if (!apiKey) continue;
+            
+            const response = await fetch(`${config.baseUrl}/quota/${apiKey}`);
+            const data = await response.json().catch(() => null);
+            
+            if (response.ok && data && data.success !== false) {
+              const remaining =
+                typeof data.quotaRemaining === 'number'
+                  ? data.quotaRemaining
+                  : typeof data.quota === 'number'
+                    ? data.quota
+                    : typeof data.remaining === 'number'
+                      ? data.remaining
+                      : null;
+              
+              if (typeof remaining === 'number') {
+                totalBalance += remaining;
+                successCount++;
+              }
+            }
+          } catch (err) {
+            console.warn(`[VendorManager] Failed to get balance for key ${key.name}:`, err);
+          }
+        }
+        
+        // Return total balance if we got at least one successful response
+        if (successCount > 0) {
+          console.log(`[VendorManager] TextBelt total balance from ${successCount} keys: ${totalBalance}`);
+          return totalBalance;
+        }
+      }
+      
+      // Fallback to single vendor config key if no pool
       const response = await fetch(`${config.baseUrl}/quota/${config.apiKey}`);
       const data = await response.json().catch(() => null);
 
@@ -514,6 +603,57 @@ export class VendorManager {
       const data = await response.json();
       return data.value ? parseFloat(data.value) : null;
     } catch { return null; }
+  }
+
+  private async getAnveoBalance(config: any): Promise<number | null> {
+    try {
+      // Anveo REST API v2 for ACCOUNT.GETBALANCE
+      const userKey = config.apiKey || config.userKey;
+      if (!userKey) {
+        console.log('[VendorManager] Anveo: No API key configured');
+        return null;
+      }
+      
+      const url = `https://www.anveo.com/api/v2.asp?userkey=${userKey}&action=ACCOUNT.GETBALANCE`;
+      console.log('[VendorManager] Fetching Anveo balance...');
+
+      const response = await fetch(url, { method: 'GET' });
+      const text = await response.text();
+      console.log(`[VendorManager] Anveo response (${response.status}):`, text.substring(0, 200));
+
+      // Response is XML: <RESPONSE><RESULT>2.18</RESULT></RESPONSE>
+      const resultMatch = text.match(/<RESULT>([0-9.]+)<\/RESULT>/i);
+      if (resultMatch && resultMatch[1]) {
+        const dollarBalance = parseFloat(resultMatch[1]);
+        console.log('[VendorManager] ✅ Anveo dollar balance: $' + dollarBalance);
+        
+        // Convert dollars to credits (messages) based on cost per SMS
+        // Default to $0.01 per SMS if not configured
+        const costPerSms = config.costPerSms || 0.01;
+        const credits = Math.floor(dollarBalance / costPerSms);
+        console.log(`[VendorManager] ✅ Anveo credits: ${credits} (@ $${costPerSms}/SMS)`);
+        return credits;
+      }
+
+      // Fallback: try parsing as plain number
+      const plainBalance = parseFloat(text.trim());
+      if (!isNaN(plainBalance)) {
+        const costPerSms = config.costPerSms || 0.01;
+        const credits = Math.floor(plainBalance / costPerSms);
+        console.log('[VendorManager] ✅ Anveo credits (plain): ' + credits);
+        return credits;
+      }
+
+      // Check for error response
+      if (text.toLowerCase().includes('error') || text.toLowerCase().includes('invalid')) {
+        console.log('[VendorManager] Anveo API Error:', text);
+      }
+
+      return null;
+    } catch (err) {
+      console.error('[VendorManager] Anveo balance error:', err);
+      return null;
+    }
   }
 
   /**

@@ -75,21 +75,22 @@ export default function SmsVendorManager() {
     },
   });
 
-  const testVendorMutation = useMutation({
+  const toggleVendorMutation = useMutation({
     mutationFn: async (vendorId: string) => {
-      return await apiRequest(`/api/admin/sms-vendors/${vendorId}/test`, {
+      const vendor = (vendorData as any)?.vendors?.find((v: any) => v.id === vendorId);
+      if (!vendor) throw new Error('Vendor not found - please wait for data to load');
+      
+      return await apiRequest(`/api/admin/sms-vendors/${vendorId}/config`, {
         method: "POST",
+        body: JSON.stringify({ enabled: !vendor.enabled }),
       });
     },
-    onSuccess: (data: any) => {
-      toast({ 
-        title: data?.success ? "Test Successful" : "Test Failed", 
-        description: data?.message || "Vendor test completed",
-        variant: data?.success ? undefined : "destructive"
-      });
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/sms-vendors"] });
+      toast({ title: t("common.success"), description: "Vendor status updated" });
     },
     onError: (error: any) => {
-      toast({ title: t("common.error"), description: error?.message || "Vendor test failed", variant: "destructive" });
+      toast({ title: t("common.error"), description: error?.message || "Failed to update vendor status", variant: "destructive" });
     },
   });
 
@@ -100,6 +101,7 @@ export default function SmsVendorManager() {
   const availableVendors = [
     { id: "textbelt", name: "TextBelt", description: "Free SMS service with limited features" },
     { id: "extremesms", name: "ExtremeSMS", description: "Premium SMS service with global coverage" },
+    { id: "anveo", name: "Anveo", description: "Low-cost US SMS provider ($0.01/msg) with 2-way messaging" },
   ];
 
   if (isLoading) {
@@ -118,7 +120,16 @@ export default function SmsVendorManager() {
     );
   }
 
-  const activeVendor = (vendorData as any)?.activeVendor || 'textbelt';
+  const activeVendor = (vendorData as any)?.activeVendor;
+
+  // Fallback vendors if data is not loaded yet
+  const fallbackVendors = [
+    { id: 'textbelt', name: 'TextBelt', enabled: true, isActive: activeVendor === 'textbelt' },
+    { id: 'extremesms', name: 'ExtremeSMS', enabled: true, isActive: activeVendor === 'extremesms' },
+    { id: 'anveo', name: 'Anveo', enabled: true, isActive: activeVendor === 'anveo' },
+  ];
+
+  const vendorsToShow = (vendorData as any)?.vendors || fallbackVendors;
 
   return (
     <div className="space-y-6">
@@ -129,7 +140,7 @@ export default function SmsVendorManager() {
         </CardHeader>
         <CardContent className="space-y-6">
           <div className="space-y-4">
-            {(vendorData as any)?.vendors?.map((vendor: any) => (
+            {vendorsToShow.map((vendor: any) => (
               <Card key={vendor.id} className="p-4">
                 <div className="flex items-center justify-between">
                   <div>
@@ -141,6 +152,9 @@ export default function SmsVendorManager() {
                   <div className="flex items-center gap-2">
                     <Badge variant={vendor.isActive ? "default" : "secondary"}>
                       {vendor.isActive ? "Active" : "Inactive"}
+                    </Badge>
+                    <Badge variant={vendor.enabled !== false ? "default" : "destructive"}>
+                      {vendor.enabled !== false ? t('common.enabled') : t('common.disabled')}
                     </Badge>
                     {vendor.health && (
                       <Badge variant={vendor.health.healthy ? "default" : "destructive"}>
@@ -195,14 +209,25 @@ export default function SmsVendorManager() {
                     </div>
                   )}
 
-                  <Button
-                    onClick={() => handleSwitchVendor(vendor.id)}
-                    disabled={switchVendorMutation.isPending || vendor.isActive}
-                    className="w-full"
-                    variant={vendor.isActive ? "outline" : "default"}
-                  >
-                    {vendor.isActive ? "Currently Active" : "Switch to this vendor"}
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={() => handleSwitchVendor(vendor.id)}
+                      disabled={switchVendorMutation.isPending || vendor.isActive || vendor.enabled === false}
+                      className="flex-1"
+                      variant={vendor.isActive ? "outline" : "default"}
+                    >
+                      {vendor.isActive ? "Currently Active" : (vendor.enabled === false ? "Vendor Disabled" : "Switch to this vendor")}
+                    </Button>
+                    <Button
+                      onClick={() => toggleVendorMutation.mutate(vendor.id)}
+                      disabled={toggleVendorMutation.isPending || vendor.isActive}
+                      variant={vendor.enabled !== false ? "destructive" : "default"}
+                      size="default"
+                      className="px-4"
+                    >
+                      {toggleVendorMutation.isPending ? "Updating..." : (vendor.enabled !== false ? t('common.disable') : t('common.enable'))}
+                    </Button>
+                  </div>
                 </div>
               </Card>
             ))}

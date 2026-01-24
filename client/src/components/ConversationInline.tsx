@@ -94,8 +94,11 @@ export default function ConversationInline({ phoneNumber, userId, isAdmin, inbox
     if (phoneNumber) markReadMutation.mutate();
   }, [phoneNumber]);
 
+  // Check if admin Direct Mode is enabled (from localStorage)
+  const isAdminDirectMode = isAdmin && localStorage.getItem('isAdminMode') === 'true';
+
   const replyMutation = useMutation({
-    mutationFn: async (data: { to: string; message: string; userId?: string }) => {
+    mutationFn: async (data: { to: string; message: string; userId?: string; adminDirect?: boolean }) => {
       return await apiRequest('/api/web/inbox/reply', { method: 'POST', body: JSON.stringify(data) });
     },
     onSuccess: () => {
@@ -200,9 +203,9 @@ export default function ConversationInline({ phoneNumber, userId, isAdmin, inbox
             onChange={(e) => setReplyText(e.target.value)}
             placeholder={t('inbox.typeReply')}
             className="flex-1 min-h-[60px] max-h-[120px] resize-none"
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (replyText.trim()) replyMutation.mutate({ to: phoneNumber, message: replyText, userId, ...(lastInbound?.usedmodem ? { usemodem: String(lastInbound.usedmodem) } : {}), ...(lastInbound?.port ? { port: String(lastInbound.port) } : {}) }); } }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (replyText.trim()) replyMutation.mutate({ to: phoneNumber, message: replyText, userId, ...(isAdminDirectMode ? { adminDirect: true } : {}), ...(lastInbound?.usedmodem ? { usemodem: String(lastInbound.usedmodem) } : {}), ...(lastInbound?.port ? { port: String(lastInbound.port) } : {}) }); } }}
           />
-          <Button onClick={() => replyText.trim() && replyMutation.mutate({ to: phoneNumber, message: replyText, userId, ...(lastInbound?.usedmodem ? { usemodem: String(lastInbound.usedmodem) } : {}), ...(lastInbound?.port ? { port: String(lastInbound.port) } : {}) })} disabled={replyMutation.isPending || !replyText.trim()} size="icon" className="h-[60px] w-[60px]">
+          <Button onClick={() => replyText.trim() && replyMutation.mutate({ to: phoneNumber, message: replyText, userId, ...(isAdminDirectMode ? { adminDirect: true } : {}), ...(lastInbound?.usedmodem ? { usemodem: String(lastInbound.usedmodem) } : {}), ...(lastInbound?.port ? { port: String(lastInbound.port) } : {}) })} disabled={replyMutation.isPending || !replyText.trim()} size="icon" className="h-[60px] w-[60px]">
             <Send className="h-4 w-4" />
           </Button>
         </div>

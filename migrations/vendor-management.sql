@@ -48,6 +48,22 @@ VALUES ('vendor_management', '{
         "unicode": false,
         "flash": false
       }
+    },
+    {
+      "id": "anveo",
+      "name": "Anveo",
+      "type": "anveo",
+      "enabled": true,
+      "priority": 1,
+      "timeout": 10000,
+      "retryAttempts": 3,
+      "retryDelay": 1000,
+      "config": {
+        "apiKey": "",
+        "baseUrl": "https://www.anveo.com/api/v1.asp",
+        "fromNumber": "",
+        "rateLimit": 60
+      }
     }
   ],
   "switchingConfig": {
@@ -71,6 +87,8 @@ VALUES
 ('textbelt_api_key', 'textbelt'),
 ('extremesms_api_key', ''),
 ('extremesms_sender_id', ''),
+('anveo_api_key', ''),
+('anveo_from_number', ''),
 ('twilio_account_sid', ''),
 ('twilio_auth_token', ''),
 ('twilio_from_number', ''),

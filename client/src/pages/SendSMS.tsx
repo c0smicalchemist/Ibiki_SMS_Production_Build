@@ -76,6 +76,26 @@ export default function SendSMS() {
   const [bulkCsvFile, setBulkCsvFile] = useState<File | null>(null);
   const [bulkCsvNumbers, setBulkCsvNumbers] = useState<string[]>([]);
 
+  // Bulk SMS progress state (for SSE streaming)
+  const [bulkProgress, setBulkProgress] = useState<{
+    isStreaming: boolean;
+    total: number;
+    current: number;
+    sent: number;
+    failed: number;
+    remainingMs: number;
+    estimatedCompletionTime: string | null;
+  }>({
+    isStreaming: false,
+    total: 0,
+    current: 0,
+    sent: 0,
+    failed: 0,
+    remainingMs: 0,
+    estimatedCompletionTime: null
+  });
+  const bulkAbortControllerRef = useRef<AbortController | null>(null);
+
   // Bulk Multi SMS state
   const [bulkMultiMessages, setBulkMultiMessages] = useState([
     { to: "", message: "" }
@@ -232,8 +252,12 @@ export default function SendSMS() {
       sendingLockRef.current = false;
       
       // Check if vendor returned an error (e.g., proxy failure)
-      if (response?.data?.error) {
-        const errorMsg = response.data.error;
+      // Check both top-level error and nested vendor error
+      const topLevelError = response?.data?.error;
+      const vendorError = response?.data?.data?.error;
+      
+      if (topLevelError || vendorError) {
+        const errorMsg = topLevelError || vendorError;
         // Check for proxy-related errors
         if (errorMsg.includes('North America') || errorMsg.includes('proxy') || errorMsg.includes('region')) {
           toast({ 
@@ -344,7 +368,7 @@ export default function SendSMS() {
     sendSingleMutation.mutate(payload);
   };
 
-  const handleSendBulk = () => {
+  const handleSendBulk = async () => {
     let recipients: string[] = [];
 
     if (selectedGroupId) {
@@ -398,7 +422,92 @@ export default function SendSMS() {
     } else if (effectiveUserId) {
       payload.userId = effectiveUserId;
     }
-    sendBulkMutation.mutate(payload);
+    
+    // Use SSE streaming for progress updates
+    bulkAbortControllerRef.current = new AbortController();
+    setBulkProgress({
+      isStreaming: true,
+      total: uniqueNormalizedRecipients.length,
+      current: 0,
+      sent: 0,
+      failed: 0,
+      remainingMs: uniqueNormalizedRecipients.length * 600,
+      estimatedCompletionTime: new Date(Date.now() + uniqueNormalizedRecipients.length * 600).toISOString()
+    });
+    
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/web/sms/send-bulk-stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(payload),
+        signal: bulkAbortControllerRef.current.signal
+      });
+      
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      
+      if (reader) {
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n\n');
+          buffer = lines.pop() || '';
+          
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                
+                if (data.type === 'progress') {
+                  setBulkProgress(prev => ({
+                    ...prev,
+                    current: data.current,
+                    sent: data.sent,
+                    failed: data.failed,
+                    remainingMs: data.remainingMs,
+                    estimatedCompletionTime: data.estimatedCompletionTime
+                  }));
+                } else if (data.type === 'complete') {
+                  toast({ 
+                    title: t('common.success'), 
+                    description: `${data.sent} ${t('sendSms.success.bulkSent')}${data.failed > 0 ? ` (${data.failed} failed)` : ''}` 
+                  });
+                  setBulkRecipients("");
+                  setBulkMessage("");
+                  setSelectedGroupId("");
+                  queryClient.invalidateQueries({ queryKey: ['/api/client/messages'] });
+                } else if (data.type === 'error') {
+                  toast({ title: t('common.error'), description: data.error, variant: "destructive" });
+                }
+              } catch (e) {
+                console.error('Failed to parse SSE data:', e);
+              }
+            }
+          }
+        }
+      }
+    } catch (error: any) {
+      if (error.name !== 'AbortError') {
+        toast({ title: t('common.error'), description: error.message || t('sendSms.error.failed'), variant: "destructive" });
+      }
+    } finally {
+      setBulkProgress(prev => ({ ...prev, isStreaming: false }));
+      bulkAbortControllerRef.current = null;
+    }
+  };
+
+  const cancelBulkSend = () => {
+    if (bulkAbortControllerRef.current) {
+      bulkAbortControllerRef.current.abort();
+      toast({ title: 'Cancelled', description: 'Bulk send cancelled' });
+    }
   };
 
   const handleSendBulkMulti = () => {
@@ -723,14 +832,45 @@ export default function SendSMS() {
                   )}
                 </div>
               </div>
+              
+              {/* Progress bar for bulk sending */}
+              {bulkProgress.isStreaming && (
+                <div className="space-y-3 p-4 border rounded-lg bg-muted/30">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm font-medium">Sending SMS...</span>
+                    <Button variant="destructive" size="sm" onClick={cancelBulkSend}>
+                      Cancel
+                    </Button>
+                  </div>
+                  <div className="w-full bg-secondary rounded-full h-3 overflow-hidden">
+                    <div 
+                      className="h-full bg-primary transition-all duration-300 ease-out"
+                      style={{ width: `${bulkProgress.total > 0 ? (bulkProgress.current / bulkProgress.total) * 100 : 0}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-sm text-muted-foreground">
+                    <span>
+                      {bulkProgress.current} / {bulkProgress.total} 
+                      <span className="ml-2 text-green-600">({bulkProgress.sent} sent)</span>
+                      {bulkProgress.failed > 0 && <span className="ml-1 text-red-600">({bulkProgress.failed} failed)</span>}
+                    </span>
+                    <span>
+                      {bulkProgress.remainingMs > 0 
+                        ? `~${Math.ceil(bulkProgress.remainingMs / 1000)}s remaining`
+                        : 'Finishing...'}
+                    </span>
+                  </div>
+                </div>
+              )}
+              
               <Button
                 onClick={handleSendBulk}
-                disabled={sendBulkMutation.isPending}
+                disabled={bulkProgress.isStreaming}
                 className="w-full"
                 data-testid="button-send-bulk"
               >
                 <Users className="h-4 w-4 mr-2" />
-                {sendBulkMutation.isPending ? t('sendSms.bulk.sending') : t('sendSms.bulk.send')}
+                {bulkProgress.isStreaming ? t('sendSms.bulk.sending') : t('sendSms.bulk.send')}
               </Button>
             </CardContent>
           </Card>
@@ -875,14 +1015,45 @@ export default function SendSMS() {
                   data-testid="textarea-bulk-csv-message"
                 />
               </div>
+              
+              {/* Progress bar for bulk CSV sending */}
+              {bulkProgress.isStreaming && (
+                <div className="space-y-3 p-4 border rounded-lg bg-muted/30">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm font-medium">Sending SMS...</span>
+                    <Button variant="destructive" size="sm" onClick={cancelBulkSend}>
+                      Cancel
+                    </Button>
+                  </div>
+                  <div className="w-full bg-secondary rounded-full h-3 overflow-hidden">
+                    <div 
+                      className="h-full bg-primary transition-all duration-300 ease-out"
+                      style={{ width: `${bulkProgress.total > 0 ? (bulkProgress.current / bulkProgress.total) * 100 : 0}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-sm text-muted-foreground">
+                    <span>
+                      {bulkProgress.current} / {bulkProgress.total} 
+                      <span className="ml-2 text-green-600">({bulkProgress.sent} sent)</span>
+                      {bulkProgress.failed > 0 && <span className="ml-1 text-red-600">({bulkProgress.failed} failed)</span>}
+                    </span>
+                    <span>
+                      {bulkProgress.remainingMs > 0 
+                        ? `~${Math.ceil(bulkProgress.remainingMs / 1000)}s remaining`
+                        : 'Finishing...'}
+                    </span>
+                  </div>
+                </div>
+              )}
+              
               <Button
                 onClick={handleSendBulk}
-                disabled={sendBulkMutation.isPending}
+                disabled={bulkProgress.isStreaming}
                 className="w-full"
                 data-testid="button-send-bulk-csv"
               >
                 <Upload className="h-4 w-4 mr-2" />
-                {sendBulkMutation.isPending ? t('sendSms.bulk.sending') : t('sendSms.bulk.send')}
+                {bulkProgress.isStreaming ? t('sendSms.bulk.sending') : t('sendSms.bulk.send')}
               </Button>
             </CardContent>
           </Card>

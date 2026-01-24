@@ -34,6 +34,11 @@ export default function ClientDashboard() {
     refetchInterval: 5000
   });
 
+  const { data: maintenanceData } = useQuery<{ enabled: boolean }>({
+    queryKey: ['/api/maintenance-mode'],
+    staleTime: 10000,
+  });
+
   const credits = profile?.credits || "0.00";
   const ratePerSms = profile?.ratePerSms || "0.02";
   const messageCount = messages?.messages?.length || 0;
@@ -63,13 +68,11 @@ export default function ClientDashboard() {
           <p className="text-xs text-muted-foreground">SMS capacity: {Math.floor(parseFloat(credits)).toLocaleString()} messages</p>
         </div>
         <div className="flex items-center gap-4">
-          <Link href="/">
-            <Button size="icon" data-testid="button-back" className="bg-blue-600 text-white hover:bg-blue-700 font-bold">
-              <ArrowLeft className="h-5 w-5" strokeWidth={3} />
-            </Button>
-          </Link>
           <div>
-            <h1 className="text-4xl font-bold tracking-tight">{t('dashboard.title')}</h1>
+            <h1 className="text-4xl font-bold tracking-tight">
+              <span className="text-blue-600">{t('dashboard.title').charAt(0)}</span>
+              {t('dashboard.title').slice(1)}
+            </h1>
             <p className="text-muted-foreground mt-2">{t('dashboard.subtitle')}</p>
           </div>
         </div>
@@ -84,9 +87,9 @@ export default function ClientDashboard() {
           <StatCard title={t('dashboard.stats.credits')} value={`${parseFloat(credits).toFixed(2)}`} icon={DollarSign} description={t('dashboard.stats.balance')} />
           <StatCard
             title={t('dashboard.stats.status')}
-            value={t('dashboard.stats.online')}
+            value={maintenanceData?.enabled ? 'Maintenance' : t('dashboard.stats.online')}
             icon={Activity}
-            description={t('dashboard.stats.operational')}
+            description={maintenanceData?.enabled ? '🟠 System in maintenance mode' : t('dashboard.stats.operational')}
           />
           <StatCard
             title={'User'}
@@ -127,10 +130,10 @@ export default function ClientDashboard() {
                     </Button>
                   </Link>
                   <div className="ml-auto flex items-center gap-2">
-                    <div className="p-2 rounded bg-primary/10 text-xs text-primary font-bold min-w-[3rem] text-center">
+                    <div className="p-2 rounded bg-slate-100 dark:bg-slate-800 text-xs text-slate-700 dark:text-slate-300 font-bold min-w-[3rem] text-center border border-slate-300 dark:border-slate-700">
                       {inboxCount.toLocaleString()}<span className="ml-1">{t('inbox.indicator.all')}</span>
                     </div>
-                    <div className="p-2 rounded bg-yellow-100 text-xs text-yellow-800 font-bold min-w-[3rem] text-center border border-yellow-500">
+                    <div className="p-2 rounded bg-blue-600 dark:bg-blue-700 text-xs text-white font-bold min-w-[3rem] text-center border border-blue-500 dark:border-blue-600">
                       {unreadCount.toLocaleString()}<span className="ml-1">{t('inbox.unreadIndicator')}</span>
                     </div>
                   </div>

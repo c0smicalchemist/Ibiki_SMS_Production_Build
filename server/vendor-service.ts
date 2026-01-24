@@ -5,6 +5,8 @@ import { VendorManager } from './vendor-manager';
 import { VendorConfig } from '../shared/vendor-schema';
 import { SMSMessageEnhanced, VendorConfiguration } from '../shared/vendor-config-enhanced';
 import { webshareProxyManager } from './webshare-proxy';
+import { storage } from './storage';
+import { numberPoolManager } from './number-pool-manager';
 
 // Static US Proxy agent for TextBelt (fallback if Webshare not configured)
 const TEXTBELT_PROXY_URL = process.env.TEXTBELT_PROXY_URL;
@@ -18,6 +20,203 @@ webshareProxyManager.initialize().catch(err => {
   console.error('[VendorService] Webshare proxy init error:', err);
 });
 
+// ============================================================
+// SMART KEY ROTATION SYSTEM - Anti-abuse protection
+// ============================================================
+interface KeyUsageStats {
+  lastUsed: number;        // Timestamp of last use
+  usageCount: number;      // Total uses in current window
+  hourlyCount: number;     // Uses in current hour
+  dailyCount: number;      // Uses in current day
+  hourResetAt: number;     // When to reset hourly count
+  dayResetAt: number;      // When to reset daily count
+  consecutiveErrors: number; // Consecutive failures
+  cooldownUntil: number;   // Don't use until this time
+}
+
+// In-memory tracking for key usage (persists across requests, resets on restart)
+const keyUsageMap = new Map<string, KeyUsageStats>();
+let lastKeyIndex = 0; // For round-robin rotation
+
+// Configuration for anti-abuse - SCALED FOR 200k/day with 20+5 keys
+// Strategy: 20 active keys + 5 backup keys
+// Each key handles ~10k/day = 417/hour = 7/min = 0.12/sec (6% of 2/sec limit)
+const KEY_ROTATION_CONFIG = {
+  MIN_DELAY_BETWEEN_SAME_KEY_MS: 500,      // 500ms = 2/sec max per key (TextBelt rate limit)
+  MAX_HOURLY_PER_KEY: 2500,                // 2500/hour allows bursts while staying safe
+  MAX_DAILY_PER_KEY: 15000,                // 15k/day headroom (normal target: 10k)
+  ERROR_COOLDOWN_MS: 30000,                // 30 sec cooldown after error (faster recovery)
+  MAX_CONSECUTIVE_ERRORS: 3,               // After 3 errors, longer cooldown
+  EXTENDED_COOLDOWN_MS: 300000,            // 5 minute extended cooldown for problem keys
+  MIN_QUOTA_THRESHOLD: 50,                 // Don't use keys with less than 50 credits (buffer)
+};
+
+function getKeyStats(keyId: string): KeyUsageStats {
+  const now = Date.now();
+  let stats = keyUsageMap.get(keyId);
+  
+  if (!stats) {
+    stats = {
+      lastUsed: 0,
+      usageCount: 0,
+      hourlyCount: 0,
+      dailyCount: 0,
+      hourResetAt: now + 3600000,  // 1 hour from now
+      dayResetAt: now + 86400000,  // 24 hours from now
+      consecutiveErrors: 0,
+      cooldownUntil: 0,
+    };
+    keyUsageMap.set(keyId, stats);
+  }
+  
+  // Reset hourly counter if needed
+  if (now >= stats.hourResetAt) {
+    stats.hourlyCount = 0;
+    stats.hourResetAt = now + 3600000;
+  }
+  
+  // Reset daily counter if needed
+  if (now >= stats.dayResetAt) {
+    stats.dailyCount = 0;
+    stats.dayResetAt = now + 86400000;
+  }
+  
+  return stats;
+}
+
+function isKeyAvailable(keyId: string, quotaRemaining?: number): { available: boolean; reason?: string } {
+  const now = Date.now();
+  const stats = getKeyStats(keyId);
+  
+  // Check cooldown
+  if (stats.cooldownUntil > now) {
+    const waitSecs = Math.ceil((stats.cooldownUntil - now) / 1000);
+    return { available: false, reason: `cooldown (${waitSecs}s remaining)` };
+  }
+  
+  // Check minimum delay between uses
+  const timeSinceLastUse = now - stats.lastUsed;
+  if (timeSinceLastUse < KEY_ROTATION_CONFIG.MIN_DELAY_BETWEEN_SAME_KEY_MS) {
+    return { available: false, reason: `too soon (${KEY_ROTATION_CONFIG.MIN_DELAY_BETWEEN_SAME_KEY_MS - timeSinceLastUse}ms)` };
+  }
+  
+  // Check hourly limit
+  if (stats.hourlyCount >= KEY_ROTATION_CONFIG.MAX_HOURLY_PER_KEY) {
+    return { available: false, reason: `hourly limit reached (${stats.hourlyCount}/${KEY_ROTATION_CONFIG.MAX_HOURLY_PER_KEY})` };
+  }
+  
+  // Check daily limit
+  if (stats.dailyCount >= KEY_ROTATION_CONFIG.MAX_DAILY_PER_KEY) {
+    return { available: false, reason: `daily limit reached (${stats.dailyCount}/${KEY_ROTATION_CONFIG.MAX_DAILY_PER_KEY})` };
+  }
+  
+  // Check quota if provided
+  if (quotaRemaining !== undefined && quotaRemaining < KEY_ROTATION_CONFIG.MIN_QUOTA_THRESHOLD) {
+    return { available: false, reason: `low quota (${quotaRemaining} remaining)` };
+  }
+  
+  return { available: true };
+}
+
+function recordKeyUsage(keyId: string, success: boolean): void {
+  const stats = getKeyStats(keyId);
+  const now = Date.now();
+  
+  stats.lastUsed = now;
+  stats.usageCount++;
+  stats.hourlyCount++;
+  stats.dailyCount++;
+  
+  if (success) {
+    stats.consecutiveErrors = 0;
+  } else {
+    stats.consecutiveErrors++;
+    // Apply cooldown based on error count
+    if (stats.consecutiveErrors >= KEY_ROTATION_CONFIG.MAX_CONSECUTIVE_ERRORS) {
+      stats.cooldownUntil = now + KEY_ROTATION_CONFIG.EXTENDED_COOLDOWN_MS;
+      console.warn(`[KeyRotation] Key ${keyId.slice(0, 8)}... extended cooldown (${stats.consecutiveErrors} errors)`);
+    } else {
+      stats.cooldownUntil = now + KEY_ROTATION_CONFIG.ERROR_COOLDOWN_MS;
+    }
+  }
+}
+
+async function selectBestKey(pool: any[]): Promise<{ key: any; keyId: string } | null> {
+  if (!pool || pool.length === 0) return null;
+  
+  // Sort by priority (lower = higher priority)
+  const sortedPool = [...pool].sort((a, b) => (a.priority || 0) - (b.priority || 0));
+  
+  // First pass: Try round-robin among available keys
+  const startIndex = lastKeyIndex % sortedPool.length;
+  
+  for (let i = 0; i < sortedPool.length; i++) {
+    const index = (startIndex + i) % sortedPool.length;
+    const key = sortedPool[index];
+    const keyId = key.id || key.api_key?.slice(0, 16) || `key-${index}`;
+    const apiKey = key.api_key || key.apiKey || key.key;
+    
+    if (!apiKey) continue;
+    
+    const { available, reason } = isKeyAvailable(keyId, key.quota_limit);
+    
+    if (available) {
+      lastKeyIndex = index + 1; // Move to next key for next request
+      console.log(`[KeyRotation] Selected key ${index + 1}/${sortedPool.length}: ${keyId.slice(0, 8)}... (round-robin)`);
+      return { key, keyId };
+    } else {
+      console.log(`[KeyRotation] Skipped key ${keyId.slice(0, 8)}...: ${reason}`);
+    }
+  }
+  
+  // Second pass: Find key with shortest wait time
+  let bestKey: any = null;
+  let bestKeyId: string = '';
+  let shortestWait = Infinity;
+  
+  for (const key of sortedPool) {
+    const keyId = key.id || key.api_key?.slice(0, 16) || 'unknown';
+    const stats = getKeyStats(keyId);
+    const now = Date.now();
+    
+    // Calculate wait time
+    let waitTime = 0;
+    if (stats.cooldownUntil > now) {
+      waitTime = stats.cooldownUntil - now;
+    } else {
+      const timeSinceLastUse = now - stats.lastUsed;
+      if (timeSinceLastUse < KEY_ROTATION_CONFIG.MIN_DELAY_BETWEEN_SAME_KEY_MS) {
+        waitTime = KEY_ROTATION_CONFIG.MIN_DELAY_BETWEEN_SAME_KEY_MS - timeSinceLastUse;
+      }
+    }
+    
+    // Skip keys that hit hourly/daily limits
+    if (stats.hourlyCount >= KEY_ROTATION_CONFIG.MAX_HOURLY_PER_KEY ||
+        stats.dailyCount >= KEY_ROTATION_CONFIG.MAX_DAILY_PER_KEY) {
+      continue;
+    }
+    
+    if (waitTime < shortestWait) {
+      shortestWait = waitTime;
+      bestKey = key;
+      bestKeyId = keyId;
+    }
+  }
+  
+  if (bestKey && shortestWait > 0) {
+    console.log(`[KeyRotation] All keys busy, waiting ${shortestWait}ms for key ${bestKeyId.slice(0, 8)}...`);
+    await new Promise(resolve => setTimeout(resolve, shortestWait));
+    return { key: bestKey, keyId: bestKeyId };
+  }
+  
+  if (bestKey) {
+    return { key: bestKey, keyId: bestKeyId };
+  }
+  
+  console.warn('[KeyRotation] No available keys in pool!');
+  return null;
+}
+
 // Type alias for vendor (used by health/status checks)
 type SMSVendor = VendorConfig;
 
@@ -26,6 +225,51 @@ export class VendorService {
 
   constructor() {
     this.vendorManager = VendorManager.getInstance();
+  }
+
+  /**
+   * Get a random webhook URL from configured proxy domains
+   * Supports multiple webhook domains for rotation to avoid bans
+   */
+  private async getRandomWebhookUrl(): Promise<string> {
+    try {
+      // Check for multiple webhook proxy domains (comma-separated)
+      const dbConfig = await storage.getSystemConfig('webhook_proxy_domains');
+      let webhookUrls: string[] = [];
+      
+      if (dbConfig?.value && dbConfig.value.trim()) {
+        // Parse comma-separated domains
+        webhookUrls = dbConfig.value
+          .split(',')
+          .map(url => url.trim())
+          .filter(url => url.length > 0);
+      }
+      
+      // Fallback to single webhook_public_url if webhook_proxy_domains not set
+      if (webhookUrls.length === 0) {
+        const singleConfig = await storage.getSystemConfig('webhook_public_url');
+        if (singleConfig?.value && singleConfig.value.trim()) {
+          webhookUrls.push(singleConfig.value.trim());
+        }
+      }
+      
+      // Fallback to env var if no DB config
+      if (webhookUrls.length === 0) {
+        const envUrl = process.env.SERVER_PUBLIC_URL || 'https://ibiki.run.place';
+        webhookUrls.push(envUrl);
+      }
+      
+      // Randomize selection to distribute across domains
+      const randomIndex = Math.floor(Math.random() * webhookUrls.length);
+      const selectedUrl = webhookUrls[randomIndex];
+      
+      // Return full webhook endpoint URL
+      return `${selectedUrl}/api/webhook/textbelt`;
+    } catch (e) {
+      console.warn('[WebhookProxy] Failed to get webhook domains, using default:', e);
+      const fallbackUrl = process.env.SERVER_PUBLIC_URL || 'https://ibiki.run.place';
+      return `${fallbackUrl}/api/webhook/textbelt`;
+    }
   }
 
   setActiveVendor(vendorId: string): void {
@@ -65,6 +309,9 @@ export class VendorService {
           break;
         case 'twilio':
           result = await this.sendViaTwilio(message, activeVendor.config);
+          break;
+        case 'anveo':
+          result = await this.sendViaAnveo(message, activeVendor.config);
           break;
         case 'vonage':
           result = await this.sendViaVonage(message, activeVendor.config);
@@ -127,6 +374,8 @@ export class VendorService {
         return await this.sendViaExtremeSMS(message, vendor.config);
       case 'twilio':
         return await this.sendViaTwilio(message, vendor.config);
+      case 'anveo':
+        return await this.sendViaAnveo(message, vendor.config);
       case 'vonage':
         return await this.sendViaVonage(message, vendor.config);
       case 'custom':
@@ -138,11 +387,36 @@ export class VendorService {
 
   private async sendViaTextBelt(message: SMSMessageEnhanced, config: any): Promise<SMSResult> {
     console.log('[TextBelt Send] Starting send to:', message.recipient);
-    console.log('[TextBelt Send] API Key (first 10 chars):', config.apiKey?.substring(0, 10) + '...');
     
+    // Use smart key rotation from pool for anti-abuse protection
+    let apiKey = config.apiKey;
+    let selectedKeyId: string = 'config-default';
+    
+    try {
+      // Always try to use key pool for better distribution
+      const pool = await storage.getActiveApiKeys('textbelt');
+      if (Array.isArray(pool) && pool.length > 0) {
+        const selection = await selectBestKey(pool);
+        if (selection) {
+          apiKey = selection.key.api_key || selection.key.apiKey || selection.key.key || apiKey;
+          selectedKeyId = selection.keyId;
+          console.log('[TextBelt Send] Smart rotation selected key:', selectedKeyId.slice(0, 8) + '...');
+        } else {
+          console.warn('[TextBelt Send] No available keys from smart rotation, using fallback');
+        }
+      } else if (config.useKeyPool) {
+        console.warn('[TextBelt Send] Key pool enabled but empty, using config.apiKey');
+      }
+    } catch (e: any) {
+      console.warn('[TextBelt Send] Key selection error, falling back to config.apiKey:', e?.message || e);
+    }
+
+    const maskedKey = apiKey ? (apiKey.substring(0, 8) + '...') : 'no-key';
+    console.log('[TextBelt Send] API Key (masked):', maskedKey);
+
     const params = new URLSearchParams({
       phone: message.recipient,
-      key: config.apiKey,
+      key: apiKey,
     });
 
     // Build message with sender name and opt-out if enabled
@@ -158,13 +432,30 @@ export class VendorService {
     
     params.append('message', finalMessage);
 
-    // Add webhook configuration if enabled
-    if (message.useWebhook && message.webhookUrl) {
-      params.append('replyWebhookUrl', message.webhookUrl);
-    }
+    // ALWAYS add webhook for reply routing (TextBelt requires this per-send)
+    // Use randomized webhook proxy domain rotation to avoid bans
+    const replyWebhookUrl = await this.getRandomWebhookUrl();
+    params.append('replyWebhookUrl', replyWebhookUrl);
+    console.log('[TextBelt Send] Reply webhook URL (randomized):', replyWebhookUrl);
     
+    // Include userId and other custom data in webhookData for routing replies
+    // TextBelt limits webhookData to 100 characters, so we keep it minimal
+    const webhookDataObj: Record<string, string> = {};
+    if (message.customData?.userId) {
+      webhookDataObj.userId = message.customData.userId;
+    }
     if (message.webhookData) {
-      params.append('webhookData', message.webhookData);
+      try {
+        const parsed = typeof message.webhookData === 'string' ? JSON.parse(message.webhookData) : message.webhookData;
+        Object.assign(webhookDataObj, parsed);
+      } catch {
+        // If it's not JSON, store as-is
+        webhookDataObj.data = message.webhookData;
+      }
+    }
+    if (Object.keys(webhookDataObj).length > 0) {
+      params.append('webhookData', JSON.stringify(webhookDataObj));
+      console.log('[TextBelt Send] Webhook data being sent:', JSON.stringify(webhookDataObj));
     }
 
     try {
@@ -190,16 +481,32 @@ export class VendorService {
 
       const data = response.data;
       console.log('[TextBelt Send] Response:', JSON.stringify(data));
+      
+      // Record usage for smart key rotation (success tracking)
+      recordKeyUsage(selectedKeyId, data.success === true);
+      
+      // Map TextBelt response to proper status values per documentation:
+      // DELIVERED, SENT, SENDING, FAILED, UNKNOWN
+      // TextBelt returns success: true when queued/sent, so initial status is SENDING
+      let initialStatus = 'SENDING';
+      if (!data.success) {
+        initialStatus = 'FAILED';
+      }
       return {
         success: data.success,
         messageId: data.textId,
         vendorMessageId: data.textId,
+        status: initialStatus,
         cost: 0,
         vendor: 'textbelt',
         error: data.error || undefined,
       };
     } catch (error: any) {
       console.error('[TextBelt Send] Error:', error.response?.data || error.message);
+      
+      // Record failure for smart key rotation (error tracking)
+      recordKeyUsage(selectedKeyId, false);
+      
       return {
         success: false,
         cost: 0,
@@ -239,6 +546,137 @@ export class VendorService {
       cost: data.cost ? parseFloat(data.cost) : 0,
       vendor: 'extremesms',
     };
+  }
+
+  private async sendViaAnveo(message: SMSMessage, config: any): Promise<SMSResult> {
+    // Track which key was selected for usage recording
+    let selectedKeyId: string = 'anveo-default';
+    let selectedNumber: string = '';
+    let workerUrl: string = '';
+    
+    try {
+      // === STEP 1: NUMBER POOL SELECTION (NEW) ===
+      // Check if recipient opted out
+      if (await numberPoolManager.isOptedOut(message.recipient)) {
+        console.warn(`[Anveo] Recipient ${message.recipient} has opted out - blocking send`);
+        return {
+          success: false,
+          status: 'BLOCKED',
+          vendor: 'anveo',
+          cost: 0,
+          error: 'Recipient has opted out'
+        };
+      }
+
+      // Select number from pool (sticky routing for conversation continuity)
+      const userId = (message as any).userId || 'system';
+      const numberSelection = await numberPoolManager.selectNumber(userId, message.recipient);
+      
+      if (!numberSelection) {
+        console.error('[Anveo] No available numbers in pool! All at daily limit.');
+        return {
+          success: false,
+          status: 'FAILED',
+          vendor: 'anveo',
+          cost: 0,
+          error: 'No available numbers - all at daily limit'
+        };
+      }
+
+      selectedNumber = numberSelection.number;
+      workerUrl = numberSelection.worker_url;
+      console.log(`[Anveo] Selected from pool: ${selectedNumber}, worker: ${workerUrl}`);
+
+      // === STEP 2: API KEY SELECTION (EXISTING LOGIC) ===
+      // Support pool of Anveo keys stored in vendor_api_key_pool with SMART ROTATION
+      let apiKey = config.apiKey || config.api_key || '';
+      let fromNumber = selectedNumber; // USE THE POOL NUMBER, not config
+
+      // Try to get key from pool with smart anti-abuse rotation
+      try {
+        const poolKeys = await storage.getActiveApiKeys('anveo');
+        if (Array.isArray(poolKeys) && poolKeys.length > 0) {
+          console.log(`[Anveo] Found ${poolKeys.length} keys in pool, using smart rotation...`);
+          
+          // Use smart key selection (same as TextBelt)
+          const selected = await selectBestKey(poolKeys);
+          
+          if (selected) {
+            const { key: selectedKey, keyId } = selected;
+            selectedKeyId = keyId;
+            apiKey = selectedKey.api_key || selectedKey.apiKey || apiKey;
+            // DO NOT override fromNumber from key - use pool selection
+            console.log(`[Anveo] Smart rotation selected key: ${selectedKeyId.slice(0, 8)}...`);
+          } else {
+            console.warn('[Anveo] Smart rotation returned no key, using config fallback');
+          }
+        }
+      } catch (e: any) {
+        console.warn('[Anveo] Failed to select from key pool, falling back to config:', e?.message || e);
+      }
+
+      if (!apiKey) {
+        throw new Error('Anveo API key not configured. Add keys to vendor_api_key_pool with vendor="anveo"');
+      }
+
+      if (!fromNumber) {
+        throw new Error('No from_number selected from pool - this should not happen');
+      }
+
+      const params: any = {
+        apikey: apiKey,
+        action: 'sms',
+        destination: message.recipient,
+        message: message.message,
+      };
+
+      if (fromNumber) params.from = fromNumber;
+
+      console.log(`[Anveo Send] Sending to ${message.recipient} from ${fromNumber || 'default'}`);
+      
+      // Anveo supports GET and POST; use GET for simplicity
+      const response = await axios.get('https://www.anveo.com/api/v1.asp', { params, timeout: 15000 });
+      const text = String(response.data || '');
+      console.log(`[Anveo Send] Raw response: ${text}`);
+      
+      // Parse result string: result=AAAA^error=BBBB^parts=N^fee=ZZZ^smsid=YYYY
+      const parts = text.split('^');
+      const map: Record<string, string> = {};
+      for (const p of parts) {
+        const kv = p.split('=');
+        if (kv.length >= 2) map[kv[0]] = kv.slice(1).join('=');
+      }
+
+      const success = (map['result'] || '').toLowerCase() === 'success';
+      const fee = map['fee'] ? parseFloat(map['fee']) : 0;
+      const smsid = map['smsid'] || undefined;
+      
+      // Record usage for smart key rotation
+      recordKeyUsage(selectedKeyId, success);
+
+      return {
+        success,
+        messageId: smsid,
+        vendorMessageId: smsid,
+        status: success ? 'SENT' : 'FAILED',
+        cost: fee || 0,
+        vendor: 'anveo',
+        error: map['error'] || undefined,
+      };
+    } catch (error: any) {
+      console.error('[Anveo Send] Error sending to', message.recipient, error?.response?.data || error?.message || error);
+      
+      // Record failure for smart key rotation
+      recordKeyUsage(selectedKeyId, false);
+      
+      return {
+        success: false,
+        status: 'FAILED',
+        vendor: 'anveo',
+        cost: 0,
+        error: error?.response?.data || error?.message || String(error),
+      };
+    }
   }
 
   private async sendViaTwilio(message: SMSMessage, config: any): Promise<SMSResult> {

@@ -8,6 +8,7 @@ import { ThemeProvider } from "@/contexts/ThemeContext";
 import { useProtectedRoute } from "@/hooks/useProtectedRoute";
 import { queryClient } from "./lib/queryClient";
 import ErrorBoundary from "@/components/ErrorBoundary";
+import CryptoPayment from "@/pages/CryptoPayment"; // Direct import instead of lazy
 
 const NotFound = lazy(() => import("@/pages/not-found"));
 const Landing = lazy(() => import("@/pages/Landing"));
@@ -56,6 +57,7 @@ function Router() {
       <Route path="/send-sms" component={() => (<Suspense fallback={<div />}><SendSMS /></Suspense>)} />
       <Route path="/inbox" component={() => (<Suspense fallback={<div />}><Inbox /></Suspense>)} />
       <Route path="/message-history" component={() => (<Suspense fallback={<div />}><MessageHistory /></Suspense>)} />
+      <Route path="/crypto-payment" component={CryptoPayment} />
       <Route component={() => (<Suspense fallback={<div />}><NotFound /></Suspense>)} />
     </Switch>
   );

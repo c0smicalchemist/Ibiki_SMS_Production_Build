@@ -1,0 +1,14 @@
+name = "textbelt-webhook-proxy"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# Set your master server URL
+[vars]
+MASTER_SERVER = "https://ibiki.run.place"
+
+# Optional: Add custom domains in Cloudflare Dashboard
+# Workers & Pages → Your Worker → Settings → Triggers → Custom Domains
+# Examples:
+#   - sms-proxy-1.yourdomain.com
+#   - sms-proxy-2.yourdomain.com
+#   - webhook-relay.yourdomain.com

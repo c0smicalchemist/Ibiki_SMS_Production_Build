@@ -91,6 +91,7 @@ export interface IStorage {
   createMessageLog(log: InsertMessageLog): Promise<MessageLog>;
   getMessageLogsByUserId(userId: string, limit?: number): Promise<MessageLog[]>;
   getMessageLogByMessageId(messageId: string): Promise<MessageLog | undefined>;
+  getMessageLogByVendorMessageId(vendorMessageId: string): Promise<MessageLog | undefined>; // For webhook reply matching
   getAllMessageLogs(limit?: number): Promise<MessageLog[]>;
   updateMessageStatus(logId: string, status: string): Promise<void>;
   findClientBySenderPhone(senderPhone: string): Promise<string | undefined>; // Find userId by sender phone number
@@ -275,12 +276,15 @@ export class MemStorage {
     const id = randomUUID();
     // First user is automatically promoted to admin
     const isFirstUser = this.users.size === 0;
-    const user: User = { 
-      ...insertUser,
+    const user: User = {
       id,
-      company: insertUser.company ?? null,
-      role: isFirstUser ? "admin" : (insertUser.role ?? "client"),
-      isActive: insertUser.isActive ?? true,
+      email: insertUser.email,
+      password: insertUser.password,
+      name: insertUser.name,
+      company: (insertUser as any).company ?? null,
+      role: isFirstUser ? "admin" : ((insertUser as any).role ?? "client"),
+      groupId: (insertUser as any).groupId ?? null,
+      isActive: (insertUser as any).isActive ?? true,
       resetToken: null,
       resetTokenExpiry: null,
       createdAt: new Date()
@@ -364,9 +368,12 @@ export class MemStorage {
   async createApiKey(insertApiKey: InsertApiKey): Promise<ApiKey> {
     const id = randomUUID();
     const apiKey: ApiKey = {
-      ...insertApiKey,
       id,
-      isActive: insertApiKey.isActive ?? true,
+      userId: insertApiKey.userId,
+      keyHash: insertApiKey.keyHash,
+      keyPrefix: insertApiKey.keyPrefix,
+      keySuffix: insertApiKey.keySuffix,
+      isActive: (insertApiKey as any).isActive ?? true,
       createdAt: new Date(),
       lastUsedAt: null
     };
@@ -411,14 +418,20 @@ export class MemStorage {
   async createClientProfile(insertProfile: InsertClientProfile): Promise<ClientProfile> {
     const id = randomUUID();
     const profile: ClientProfile = {
-      ...insertProfile,
       id,
-      credits: insertProfile.credits ?? "0.00",
-      currency: insertProfile.currency ?? "USD",
-      customMarkup: insertProfile.customMarkup ?? null,
-      assignedPhoneNumbers: insertProfile.assignedPhoneNumbers ?? null,
-      rateLimitPerMinute: insertProfile.rateLimitPerMinute ?? 200,
-      businessName: insertProfile.businessName ?? null,
+      userId: insertProfile.userId,
+      credits: (insertProfile as any).credits ?? "0.00",
+      creditsTextbelt: (insertProfile as any).creditsTextbelt ?? "0.00",
+      creditsExtremesms: (insertProfile as any).creditsExtremesms ?? "0.00",
+      creditsAnveo: (insertProfile as any).creditsAnveo ?? "0.00",
+      currency: (insertProfile as any).currency ?? "USD",
+      customMarkup: (insertProfile as any).customMarkup ?? null,
+      assignedPhoneNumbers: (insertProfile as any).assignedPhoneNumbers ?? null,
+      rateLimitPerMinute: (insertProfile as any).rateLimitPerMinute ?? 200,
+      businessName: (insertProfile as any).businessName ?? null,
+      deliveryMode: (insertProfile as any).deliveryMode ?? "poll",
+      webhookUrl: (insertProfile as any).webhookUrl ?? null,
+      webhookSecret: (insertProfile as any).webhookSecret ?? null,
       updatedAt: new Date()
     };
     this.clientProfiles.set(id, profile);
@@ -521,15 +534,24 @@ export class MemStorage {
   async createMessageLog(insertLog: InsertMessageLog): Promise<MessageLog> {
     const id = randomUUID();
     const log: MessageLog = {
-      ...insertLog,
       id,
-      messageCount: insertLog.messageCount ?? 1,
-      recipients: insertLog.recipients ?? null,
-      recipient: insertLog.recipient ?? null,
-      senderPhoneNumber: insertLog.senderPhoneNumber ?? null,
-      requestPayload: insertLog.requestPayload ?? null,
-      responsePayload: insertLog.responsePayload ?? null,
-      isExample: insertLog.isExample ?? false,
+      userId: insertLog.userId,
+      messageId: insertLog.messageId,
+      vendorMessageId: (insertLog as any).vendorMessageId ?? null,
+      vendor: (insertLog as any).vendor ?? 'extremesms',
+      endpoint: insertLog.endpoint,
+      recipient: (insertLog as any).recipient ?? null,
+      recipients: (insertLog as any).recipients ?? null,
+      senderPhoneNumber: (insertLog as any).senderPhoneNumber ?? null,
+      status: insertLog.status,
+      costPerMessage: insertLog.costPerMessage,
+      chargePerMessage: insertLog.chargePerMessage,
+      totalCost: insertLog.totalCost,
+      totalCharge: insertLog.totalCharge,
+      messageCount: (insertLog as any).messageCount ?? 1,
+      requestPayload: (insertLog as any).requestPayload ?? null,
+      responsePayload: (insertLog as any).responsePayload ?? null,
+      isExample: (insertLog as any).isExample ?? false,
       createdAt: new Date()
     };
     this.messageLogs.set(id, log);
@@ -547,6 +569,12 @@ export class MemStorage {
   async getMessageLogByMessageId(messageId: string): Promise<MessageLog | undefined> {
     return Array.from(this.messageLogs.values()).find(
       (log) => log.messageId === messageId,
+    );
+  }
+
+  async getMessageLogByVendorMessageId(vendorMessageId: string): Promise<MessageLog | undefined> {
+    return Array.from(this.messageLogs.values()).find(
+      (log) => log.vendorMessageId === vendorMessageId,
     );
   }
 
@@ -686,9 +714,14 @@ export class MemStorage {
   async createCreditTransaction(insertTransaction: InsertCreditTransaction): Promise<CreditTransaction> {
     const id = randomUUID();
     const transaction: CreditTransaction = {
-      ...insertTransaction,
       id,
-      messageLogId: insertTransaction.messageLogId ?? null,
+      userId: insertTransaction.userId,
+      amount: insertTransaction.amount,
+      type: insertTransaction.type,
+      description: insertTransaction.description,
+      balanceBefore: insertTransaction.balanceBefore,
+      balanceAfter: insertTransaction.balanceAfter,
+      messageLogId: (insertTransaction as any).messageLogId ?? null,
       createdAt: new Date()
     };
     this.creditTransactions.set(id, transaction);
@@ -711,11 +744,12 @@ export class MemStorage {
   async createClientContact(insertContact: InsertClientContact): Promise<ClientContact> {
     const id = randomUUID();
     const contact: ClientContact = {
-      ...insertContact,
       id,
-      firstname: insertContact.firstname ?? null,
-      lastname: insertContact.lastname ?? null,
-      business: insertContact.business ?? null,
+      userId: insertContact.userId,
+      phoneNumber: insertContact.phoneNumber,
+      firstname: (insertContact as any).firstname ?? null,
+      lastname: (insertContact as any).lastname ?? null,
+      business: (insertContact as any).business ?? null,
       createdAt: new Date(),
       updatedAt: new Date()
     };
@@ -775,10 +809,11 @@ export class MemStorage {
   async createContactGroup(insertGroup: InsertContactGroup): Promise<ContactGroup> {
     const id = randomUUID();
     const group: ContactGroup = {
-      ...insertGroup,
       id,
-      description: insertGroup.description ?? null,
-      businessUnitPrefix: insertGroup.businessUnitPrefix ?? null,
+      userId: insertGroup.userId,
+      name: insertGroup.name,
+      description: (insertGroup as any).description ?? null,
+      businessUnitPrefix: (insertGroup as any).businessUnitPrefix ?? null,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -821,15 +856,16 @@ export class MemStorage {
   async createContact(insertContact: InsertContact): Promise<Contact> {
     const id = randomUUID();
     const contact: Contact = {
-      ...insertContact,
       id,
-      groupId: insertContact.groupId ?? null,
-      name: insertContact.name ?? null,
-      email: insertContact.email ?? null,
-      notes: insertContact.notes ?? null,
-      syncedToExtremeSMS: insertContact.syncedToExtremeSMS ?? false,
-      lastExportedAt: insertContact.lastExportedAt ?? null,
-      isExample: insertContact.isExample ?? false,
+      userId: insertContact.userId,
+      groupId: (insertContact as any).groupId ?? null,
+      phoneNumber: insertContact.phoneNumber,
+      name: (insertContact as any).name ?? null,
+      email: (insertContact as any).email ?? null,
+      notes: (insertContact as any).notes ?? null,
+      syncedToExtremeSMS: (insertContact as any).syncedToExtremeSMS ?? false,
+      lastExportedAt: (insertContact as any).lastExportedAt ?? null,
+      isExample: (insertContact as any).isExample ?? false,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -1149,7 +1185,7 @@ export class DbStorage {
     
     const result = await this.db.insert(users).values({
       ...user,
-      role: isFirstUser ? 'admin' : (user.role || 'client')
+      role: isFirstUser ? 'admin' : ((user as any).role || 'client')
     }).returning();
     return result[0];
   }
@@ -1254,6 +1290,7 @@ export class DbStorage {
       credits: '0.00',
       creditsTextbelt: '0.00',
       creditsExtremesms: '0.00',
+      creditsAnveo: '0.00',
       customMarkup: '0.00',
       assignedPhoneNumbers: [],
       ...profile
@@ -1262,20 +1299,18 @@ export class DbStorage {
   }
 
   async updateClientVendorCredits(userId: string, vendor: string, newCredits: string): Promise<ClientProfile | undefined> {
-    const updateData: any = {};
+    const updateData: any = {
+      credits: newCredits,  // Always update main credits column for header display
+    };
     if (vendor === 'textbelt') {
       updateData.creditsTextbelt = newCredits;
     } else if (vendor === 'extremesms') {
       updateData.creditsExtremesms = newCredits;
+    } else if (vendor === 'anveo') {
+      updateData.creditsAnveo = newCredits;
     }
-    // Also update main credits field for backward compatibility or display if needed, 
-    // OR we just leave it. Let's assume 'credits' maps to the ACTIVE vendor or just deprecated.
-    // For now, let's NOT update 'credits' automatically unless we decide 'credits' = 'extremesms'.
-    // User asked for separation.
-    
-    // However, the UI currently reads 'credits'. 
-    // If I don't update 'credits', the old UI will show stale data.
-    // I should probably map 'credits' to 'creditsExtremesms' in the future, but for now let's just update the specific column.
+    // Update main 'credits' column to match the vendor being updated
+    // This ensures the header and other displays show correct values
     
     const result = await this.db.update(clientProfiles)
       .set({ ...updateData, updatedAt: new Date() })
@@ -1285,8 +1320,16 @@ export class DbStorage {
   }
 
   async updateClientCredits(userId: string, newCredits: string): Promise<ClientProfile | undefined> {
+    // Update ALL credit columns to keep them in sync
+    // This ensures header, admin dashboard, and all views show consistent values
     const result = await this.db.update(clientProfiles)
-      .set({ credits: newCredits })
+      .set({ 
+        credits: newCredits,
+        creditsTextbelt: newCredits,
+        creditsExtremesms: newCredits,
+        creditsAnveo: newCredits,
+        updatedAt: new Date()
+      })
       .where(eq(clientProfiles.userId, userId))
       .returning();
     return result[0];
@@ -1407,6 +1450,13 @@ export class DbStorage {
   async getMessageLogByMessageId(messageId: string): Promise<MessageLog | undefined> {
     const result = await this.db.select().from(messageLogs)
       .where(eq(messageLogs.messageId, messageId));
+    return result[0];
+  }
+
+  async getMessageLogByVendorMessageId(vendorMessageId: string): Promise<MessageLog | undefined> {
+    // Look up by vendor_message_id (TextBelt textId, etc.) for webhook reply matching
+    const result = await this.db.select().from(messageLogs)
+      .where(eq(messageLogs.vendorMessageId, vendorMessageId));
     return result[0];
   }
 
@@ -2004,6 +2054,259 @@ export class DbStorage {
       isRead: false,
       isExample: true
     });
+  }
+
+  // ============================================================================
+  // API KEY POOL METHODS - For scaling SMS throughput
+  // ============================================================================
+
+  async getActiveApiKeys(vendor: string): Promise<any[]> {
+    const result = await this.db.execute(sql`
+      SELECT * FROM vendor_api_key_pool 
+      WHERE vendor = ${vendor} AND is_active = true 
+      ORDER BY priority ASC, created_at ASC
+    `);
+    return result.rows || [];
+  }
+
+  async getAllApiKeysInPool(vendor?: string): Promise<any[]> {
+    if (vendor) {
+      const result = await this.db.execute(sql`
+        SELECT * FROM vendor_api_key_pool 
+        WHERE vendor = ${vendor}
+        ORDER BY priority ASC, created_at ASC
+      `);
+      return result.rows || [];
+    }
+    const result = await this.db.execute(sql`
+      SELECT * FROM vendor_api_key_pool ORDER BY vendor, priority ASC
+    `);
+    return result.rows || [];
+  }
+
+  async addApiKeyToPool(params: {
+    vendor: string;
+    name: string;
+    apiKey: string;
+    fromNumber?: string;
+    priority?: number;
+    weight?: number;
+    quotaLimit?: number;
+    rateLimit?: string;
+    isActive?: boolean;
+  }): Promise<any> {
+    const result = await this.db.execute(sql`
+      INSERT INTO vendor_api_key_pool (vendor, name, api_key, from_number, priority, weight, quota_limit, rate_limit, is_active)
+      VALUES (${params.vendor}, ${params.name}, ${params.apiKey}, ${params.fromNumber || null},
+              ${params.priority || 0}, ${params.weight || 100}, 
+              ${params.quotaLimit || 0}, ${params.rateLimit || '2.00'}, 
+              ${params.isActive !== false})
+      RETURNING *
+    `);
+    return (result.rows || [])[0];
+  }
+
+  async updateApiKeyInPool(keyId: string, params: Partial<{
+    name: string;
+    apiKey: string;
+    isActive: boolean;
+    priority: number;
+    weight: number;
+    quotaLimit: number;
+    rateLimit: number;
+  }>): Promise<any | null> {
+    const updates: string[] = [];
+    if (params.name !== undefined) updates.push(`name = '${params.name}'`);
+    if (params.apiKey !== undefined) updates.push(`api_key = '${params.apiKey}'`);
+    if (params.isActive !== undefined) updates.push(`is_active = ${params.isActive}`);
+    if (params.priority !== undefined) updates.push(`priority = ${params.priority}`);
+    if (params.weight !== undefined) updates.push(`weight = ${params.weight}`);
+    if (params.quotaLimit !== undefined) updates.push(`quota_limit = ${params.quotaLimit}`);
+    if (params.rateLimit !== undefined) updates.push(`rate_limit = ${params.rateLimit}`);
+    updates.push(`updated_at = NOW()`);
+    
+    if (updates.length > 0) {
+      const result = await this.db.execute(sql.raw(`UPDATE vendor_api_key_pool SET ${updates.join(', ')} WHERE id = '${keyId}' RETURNING *`));
+      return (result.rows || [])[0] || null;
+    }
+    return null;
+  }
+
+  async removeApiKeyFromPool(keyId: string): Promise<boolean> {
+    const result = await this.db.execute(sql`DELETE FROM vendor_api_key_pool WHERE id = ${keyId}`);
+    return (result as any).rowCount > 0;
+  }
+
+  async recordApiKeySuccess(keyId: string): Promise<void> {
+    await this.db.execute(sql`
+      UPDATE vendor_api_key_pool 
+      SET quota_used = quota_used + 1, 
+          total_sent = total_sent + 1, 
+          consecutive_errors = 0,
+          last_used_at = NOW(),
+          updated_at = NOW()
+      WHERE id = ${keyId}
+    `);
+  }
+
+  async recordApiKeyFailure(keyId: string, error: string): Promise<void> {
+    await this.db.execute(sql`
+      UPDATE vendor_api_key_pool 
+      SET total_failed = total_failed + 1, 
+          consecutive_errors = consecutive_errors + 1,
+          last_error = ${error},
+          last_error_at = NOW(),
+          updated_at = NOW()
+      WHERE id = ${keyId}
+    `);
+  }
+
+  async resetApiKeyQuotas(): Promise<void> {
+    await this.db.execute(sql`
+      UPDATE vendor_api_key_pool 
+      SET quota_used = 0, quota_reset_at = NOW(), updated_at = NOW()
+    `);
+  }
+
+  // ============================================================================
+  // SMS QUEUE METHODS - For bulk message processing
+  // ============================================================================
+
+  async addToSmsQueue(params: {
+    userId: string;
+    recipient: string;
+    message: string;
+    priority?: number;
+    routeWindowOnly?: boolean;
+    costPerMessage?: string;
+    chargePerMessage?: string;
+    metadata?: any;
+    status?: string;
+  }): Promise<string> {
+    const result = await this.db.execute(sql`
+      INSERT INTO sms_queue (user_id, recipient, message, priority, route_window_only, 
+                             cost_per_message, charge_per_message, metadata, status)
+      VALUES (${params.userId}, ${params.recipient}, ${params.message}, 
+              ${params.priority || 50}, ${params.routeWindowOnly !== false},
+              ${params.costPerMessage || '0.0100'}, ${params.chargePerMessage || '0.0150'},
+              ${JSON.stringify(params.metadata || {})}, ${params.status || 'pending'})
+      RETURNING id
+    `);
+    return (result.rows || [])[0]?.id;
+  }
+
+  async getQueuedMessages(limit: number, status?: string, offset?: number): Promise<any[]> {
+    const result = await this.db.execute(sql`
+      SELECT * FROM sms_queue 
+      WHERE status = ${status || 'pending'}
+      ORDER BY priority ASC, created_at ASC
+      LIMIT ${limit}
+      OFFSET ${offset || 0}
+    `);
+    return result.rows || [];
+  }
+
+  async getQueuedMessagesForProcessing(limit: number): Promise<any[]> {
+    const result = await this.db.execute(sql`
+      SELECT * FROM sms_queue 
+      WHERE status = 'pending'
+        AND (scheduled_for IS NULL OR scheduled_for <= NOW())
+      ORDER BY priority ASC, created_at ASC
+      LIMIT ${limit}
+      FOR UPDATE SKIP LOCKED
+    `);
+    return result.rows || [];
+  }
+
+  async updateQueueMessageStatus(messageId: string, status: string, params?: {
+    vendorMessageId?: string;
+    vendorStatus?: string;
+    apiKeyId?: string;
+    processedAt?: Date;
+    lastError?: string;
+    attempts?: number;
+    lastAttemptAt?: Date;
+  }): Promise<void> {
+    const updates = [`status = '${status}'`];
+    if (params?.vendorMessageId) updates.push(`vendor_message_id = '${params.vendorMessageId}'`);
+    if (params?.vendorStatus) updates.push(`vendor_status = '${params.vendorStatus}'`);
+    if (params?.apiKeyId) updates.push(`api_key_id = '${params.apiKeyId}'`);
+    if (params?.processedAt) updates.push(`processed_at = '${params.processedAt.toISOString()}'`);
+    if (params?.lastError) updates.push(`last_error = '${params.lastError.replace(/'/g, "''")}'`);
+    if (params?.attempts !== undefined) updates.push(`attempts = ${params.attempts}`);
+    if (params?.lastAttemptAt) updates.push(`last_attempt_at = '${params.lastAttemptAt.toISOString()}'`);
+    
+    await this.db.execute(sql.raw(`UPDATE sms_queue SET ${updates.join(', ')} WHERE id = '${messageId}'`));
+  }
+
+  async getQueueDepth(): Promise<{
+    pending: number;
+    processing: number;
+    sent: number;
+    failed: number;
+  }> {
+    const result = await this.db.execute(sql`
+      SELECT status, COUNT(*) as count FROM sms_queue GROUP BY status
+    `);
+    const counts: any = { pending: 0, processing: 0, sent: 0, failed: 0 };
+    for (const row of (result.rows || [])) {
+      if (row.status in counts) {
+        counts[row.status] = parseInt(row.count || '0');
+      }
+    }
+    return counts;
+  }
+
+  async getQueueStatistics(): Promise<{
+    pending: number;
+    processing: number;
+    sent: number;
+    failed: number;
+    byPriority: Record<string, number>;
+  }> {
+    const result = await this.db.execute(sql`
+      SELECT status, COUNT(*) as count FROM sms_queue 
+      GROUP BY status
+    `);
+    const stats: any = { pending: 0, processing: 0, sent: 0, failed: 0, byPriority: {} };
+    for (const row of (result.rows || [])) {
+      stats[row.status] = parseInt(row.count);
+    }
+    
+    const priorityResult = await this.db.execute(sql`
+      SELECT priority, COUNT(*) as count FROM sms_queue 
+      WHERE status = 'pending'
+      GROUP BY priority
+    `);
+    for (const row of (priorityResult.rows || [])) {
+      stats.byPriority[row.priority] = parseInt(row.count);
+    }
+    
+    return stats;
+  }
+
+  async cancelQueuedMessages(userId?: string): Promise<number> {
+    if (userId) {
+      const result = await this.db.execute(sql`
+        UPDATE sms_queue SET status = 'cancelled' 
+        WHERE user_id = ${userId} AND status = 'pending'
+      `);
+      return (result as any).rowCount || 0;
+    }
+    // Cancel all pending messages
+    const result = await this.db.execute(sql`
+      UPDATE sms_queue SET status = 'cancelled' 
+      WHERE status = 'pending'
+    `);
+    return (result as any).rowCount || 0;
+  }
+
+  async cancelUserQueuedMessages(userId: string): Promise<number> {
+    const result = await this.db.execute(sql`
+      UPDATE sms_queue SET status = 'cancelled' 
+      WHERE user_id = ${userId} AND status = 'pending'
+    `);
+    return (result as any).rowCount || 0;
   }
 }
 

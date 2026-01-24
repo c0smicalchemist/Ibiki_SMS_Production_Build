@@ -144,6 +144,7 @@ export default function MessageHistory() {
   const [bulkNumbers, setBulkNumbers] = useState<string[]>([]);
   const [idsOpen, setIdsOpen] = useState(false);
   const [bulkIds, setBulkIds] = useState<string[]>([]);
+  const [bulkIdMap, setBulkIdMap] = useState<Array<{ id: string; recipient?: string | null; status?: string }>>([]);
 
   // Safe JSON parse helper
   const safeJsonParse = (jsonString: string | null): any => {
@@ -158,6 +159,22 @@ export default function MessageHistory() {
   const extractMessageIds = (msg: MessageLog): string[] => {
     const ids: string[] = [];
     const response = safeJsonParse(msg.responsePayload);
+    
+    // For bulk sends with results array, extract messageId from each result once
+    if (response?.results && Array.isArray(response.results)) {
+      for (const result of response.results) {
+        // Only use the top-level messageId from each result, not nested ones
+        if (result.messageId && typeof result.messageId === 'string') {
+          ids.push(result.messageId);
+        }
+      }
+      // Return unique IDs from results
+      if (ids.length > 0) {
+        return [...new Set(ids)];
+      }
+    }
+    
+    // Fallback: recursively collect (for non-bulk messages)
     const collectFromObj = (obj: any) => {
       if (!obj || typeof obj !== 'object') return;
       for (const [k, v] of Object.entries(obj)) {
@@ -188,7 +205,8 @@ export default function MessageHistory() {
     if (ids.length === 0 && Array.isArray(msg.recipients)) {
       return msg.recipients.map(() => 'unknown');
     }
-    return ids;
+    // Always deduplicate
+    return [...new Set(ids)];
   };
 
   // Filter messages based on search query
@@ -218,12 +236,12 @@ export default function MessageHistory() {
   const getStatusBadge = (status: string) => {
     const statusLower = status.toLowerCase();
     
-    // Color mapping: queued=yellow, sent=blue, delivered=green, failed=red
+    // Color mapping: queued=yellow, sending/sent=blue, delivered=green, failed=red
     if (statusLower.includes('queue')) {
       return <Badge className="bg-yellow-500/10 text-yellow-600 dark:text-yellow-400">{status}</Badge>;
     }
-    if (statusLower.includes('sent') || statusLower.includes('pending')) {
-      return <Badge className="bg-blue-500/10 text-blue-600 dark:text-blue-400">{status}</Badge>;
+    if (statusLower.includes('sending') || statusLower.includes('sent') || statusLower.includes('pending')) {
+      return <Badge className="bg-blue-500/10 text-blue-600 dark:text-blue-400">{statusLower === 'sending' ? 'Sending' : status}</Badge>;
     }
     if (statusLower.includes('deliver') || statusLower.includes('success')) {
       return <Badge className="bg-green-500/10 text-green-600 dark:text-green-400">{status}</Badge>;
@@ -405,7 +423,25 @@ export default function MessageHistory() {
                                     variant="outline"
                                     size="sm"
                                     className="border-purple-500 text-purple-600 font-bold"
-                                    onClick={() => { setBulkIds(ids); setIdsOpen(true); }}
+                                    onClick={() => {
+                                      // Build a mapping of messageId -> recipient -> status when opening the dialog
+                                      const response = safeJsonParse(msg.responsePayload);
+                                      let map: Array<{ id: string; recipient?: string | null; status?: string }> = [];
+                                      if (response?.results && Array.isArray(response.results)) {
+                                        map = response.results.map((r: any) => ({
+                                          id: (r.messageId || r.data?.messageId || r.data?.vendorMessageId || msg.messageId || 'unknown'),
+                                          recipient: (r.recipient || r.to || null),
+                                          status: (r.data?.status || r.status || msg.status || 'unknown')
+                                        }));
+                                      } else if (ids.length > 0 && Array.isArray(msg.recipients)) {
+                                        map = ids.map((id: string, idx: number) => ({ id, recipient: msg.recipients[idx] || null, status: msg.status }));
+                                      } else {
+                                        map = ids.map((id: string) => ({ id, recipient: undefined, status: msg.status }));
+                                      }
+                                      setBulkIdMap(map);
+                                      setBulkIds(ids);
+                                      setIdsOpen(true);
+                                    }}
                                   >
                                     IDs ({ids.length})
                                   </Button>
@@ -501,11 +537,55 @@ export default function MessageHistory() {
               <h4 className="text-sm font-semibold">IDs ({bulkIds.length})</h4>
               <Button variant="outline" size="sm" onClick={async () => { try { await navigator.clipboard.writeText(bulkIds.join('\n')); } catch {} }}>Copy All</Button>
             </div>
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-sm font-semibold">IDs ({bulkIdMap.length})</h4>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={async () => { try { await navigator.clipboard.writeText(bulkIdMap.map(x=>x.id).join('\n')); } catch {} }}>Copy All</Button>
+                <Button variant="ghost" size="sm" onClick={async () => {
+                  // Refresh all statuses
+                  try {
+                    const token = localStorage.getItem('token');
+                    const updated = await Promise.all(bulkIdMap.map(async (it) => {
+                      try {
+                        const resp = await fetch(`/api/dashboard/sms/status/${it.id}`, { headers: { 'Authorization': `Bearer ${token}` } });
+                        if (!resp.ok) return it;
+                        const d = await resp.json();
+                        return { ...it, status: d.status || d.statusDescription || it.status };
+                      } catch { return it; }
+                    }));
+                    setBulkIdMap(updated as any);
+                    // Trigger refetch of message lists
+                    queryClient.invalidateQueries({ queryKey: ['/api/client/messages'] });
+                    queryClient.invalidateQueries({ queryKey: ['/api/admin/messages'] });
+                  } catch (e) {}
+                }}>Refresh All</Button>
+              </div>
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {bulkIds.map((id, i) => (
+              {bulkIdMap.map((it, i) => (
                 <div key={`id-${i}`} className="grid grid-cols-[1fr_auto] items-center gap-2 border rounded p-2">
-                  <div className="font-mono text-xs truncate" title={id}>{id}</div>
-                  <Button variant="ghost" size="sm" className="shrink-0 whitespace-nowrap" onClick={async () => { try { await navigator.clipboard.writeText(id); } catch {} }}>Copy</Button>
+                  <div className="min-w-0">
+                    <div className="font-mono text-xs truncate" title={it.id}>{it.id}</div>
+                    <div className="text-xs text-muted-foreground truncate">{it.recipient || '-'}</div>
+                  </div>
+                  <div className="flex flex-col items-end gap-1">
+                    <div>{getStatusBadge((it.status || 'unknown'))}</div>
+                    <div className="flex gap-1">
+                      <Button variant="ghost" size="sm" className="shrink-0 whitespace-nowrap" onClick={async () => { try { await navigator.clipboard.writeText(it.id); } catch {} }}>Copy</Button>
+                      <Button variant="outline" size="sm" onClick={async () => {
+                        try {
+                          const token = localStorage.getItem('token');
+                          const resp = await fetch(`/api/dashboard/sms/status/${it.id}`, { headers: { 'Authorization': `Bearer ${token}` } });
+                          if (!resp.ok) return;
+                          const d = await resp.json();
+                          const newStatus = d.status || d.statusDescription || it.status;
+                          setBulkIdMap(prev => prev.map(p => p.id === it.id ? { ...p, status: newStatus } : p));
+                          queryClient.invalidateQueries({ queryKey: ['/api/client/messages'] });
+                          queryClient.invalidateQueries({ queryKey: ['/api/admin/messages'] });
+                        } catch (e) {}
+                      }}>Refresh</Button>
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>

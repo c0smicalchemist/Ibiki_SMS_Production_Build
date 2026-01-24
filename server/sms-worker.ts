@@ -29,16 +29,19 @@ async function processSMSJob(job: Job<SMSJobData, SMSJobResult>): Promise<SMSJob
     });
 
     // Log the message
+    // Vendor now always provides status (SENT, FAILED, DELIVERED, etc.)
+    const vendorStatus = (vendorResult as any).status || 'UNKNOWN';
     const messageLog = {
       id: randomUUID(),
       userId,
-      messageId: job.data.jobId,
+      // Prefer vendor-provided messageId for status checks; fall back to jobId
+      messageId: vendorResult.messageId || job.data.jobId,
       vendorMessageId: vendorResult.messageId || null,
       recipient,
       message: message.substring(0, 500), // Truncate for storage
       senderId: senderId || null,
       vendor,
-      status: vendorResult.success ? 'sent' : 'failed',
+      status: vendorStatus,
       creditsCharged: clientRate.toString(),
       vendorCost: vendorCost.toString(),
       errorMessage: vendorResult.error || null,

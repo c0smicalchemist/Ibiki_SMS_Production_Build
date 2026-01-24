@@ -74,7 +74,15 @@ export function AddCreditsToClientDialog({ clientId, clientName, currentCredits,
       });
     },
     onSuccess: (data: any) => {
+      // Invalidate all related queries to refresh UI
+      // Invalidate queries to trigger refetch (staleTime: 0 ensures immediate refetch)
       queryClient.invalidateQueries({ queryKey: ['/api/admin/clients'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/admin/vendor-balance'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/web/account/balance'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/admin/extremesms-balance'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/group/pool'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/web/profile'] });
+      
       // Optimistically update the cache for immediate UI reflection
       const key = ['/api/admin/clients'];
       const existing: any = queryClient.getQueryData(key);
