@@ -294,7 +294,76 @@ export const translations: Record<Language, Record<string, string>> = {
     'contacts.error.exportFailed': 'Export failed',
     'contacts.includeBusiness': 'Include business',
     'credits.note': '1 credit = 1 SMS. Capacity is based on credits only.',
-    'credits.capacity': 'SMS capacity'
+    'credits.capacity': 'SMS capacity',
+
+    // Message Status Chart
+    'chart.messageStatusOverview': 'Message Status Overview',
+    'chart.allTime': 'All Time',
+    'chart.today': 'Today',
+    'chart.delivered': 'Delivered',
+    'chart.sent': 'Sent',
+    'chart.replied': 'Replied',
+    'chart.failed': 'Failed',
+    'chart.total': 'Total',
+    'chart.noData': 'No Data',
+    'chart.messages': 'messages',
+
+    // Admin Dashboard - Credits Overview
+    'admin.creditsOverview': 'Credits Overview',
+    'admin.vendorBalance': 'Vendor Balance',
+    'admin.allocatedCredits': 'Allocated Credits',
+    'admin.remainingCredits': 'Remaining Credits',
+    'admin.currentBalance': 'Current balance',
+    'admin.sumClientCredits': 'Sum of all client credits',
+    'admin.vendorMinusAllocated': 'Vendor Balance - Allocated',
+    'admin.smsCapacity': 'SMS capacity',
+    'admin.reconcile': 'Reconcile',
+    'admin.inSync': 'In Sync',
+    'admin.needsReconcile': 'Needs Reconcile',
+    'admin.payPerUse': 'Pay-per-use',
+    'admin.prepaidCredit': 'Prepaid credit - charged per SMS',
+    'admin.unlimitedCapacity': 'Unlimited capacity (prepaid)',
+    'admin.pooledBalance': 'Pooled balance for supervisors in your group',
+    'admin.supervisorPooled': 'Supervisor pooled minus allocated (group)',
+
+    // Admin Dashboard - Stats
+    'admin.user': 'User',
+    'admin.loggedInAs': 'Logged in as',
+    'admin.maintenance': 'Maintenance',
+    'admin.maintenanceMode': 'System in maintenance mode',
+    'admin.vendor': 'Vendor',
+    'admin.noVendor': 'No vendor',
+    'admin.restarts': 'Restarts',
+    'admin.loading': 'Loading...',
+    'admin.connectionError': 'Connection Error',
+    'admin.retryNeeded': 'Retry needed',
+    'admin.fetchingProfile': 'Fetching profile...',
+    'admin.unknown': 'Unknown',
+    'admin.credits': 'credits',
+    'admin.active': 'Active',
+    'admin.refreshWebhookStatus': 'Refresh Webhook Status',
+
+    // Inbox
+    'inbox.retrieveNow': 'Retrieve Inbox Now',
+    'inbox.viewAndReply': 'View and reply to incoming messages',
+
+    // Navigation cards
+    'nav.contacts': 'Contacts',
+    'nav.contacts.description': 'Manage your contact list',
+    'nav.messageHistory': 'Message History',
+    'nav.messageHistory.description': 'Track delivery status and history',
+
+    // Message Status Tiles
+    'tiles.messageStatusAllTime': 'Message Status - All Time',
+    'tiles.messageStatusToday': 'Message Status - Today',
+    'tiles.totalOutbound': 'Total Outbound',
+    'tiles.uniqueReplies': 'Unique Replies',
+    'tiles.carrierConfirmed': 'Carrier has confirmed sending',
+    'tiles.sentToCarrier': 'Sent to carrier, receipt unavailable',
+    'tiles.uniqueFirstReplies': 'Unique client first replies',
+    'tiles.notReceived': 'Not received',
+    'tiles.optOuts': 'Opt-Outs',
+    'tiles.stopKeyword': 'STOP keyword received'
   },
   zh: {
     'common.loading': '加载中…',
@@ -589,7 +658,76 @@ export const translations: Record<Language, Record<string, string>> = {
     'contacts.error.exportFailed': '导出失败',
     'contacts.includeBusiness': '包含公司',
     'credits.note': '1 余额 = 1 短信。容量仅依据余额计算。',
-    'credits.capacity': '短信容量'
+    'credits.capacity': '短信容量',
+
+    // Message Status Chart - 消息状态图表
+    'chart.messageStatusOverview': '消息状态概览',
+    'chart.allTime': '所有时间',
+    'chart.today': '今日',
+    'chart.delivered': '已送达',
+    'chart.sent': '已发送',
+    'chart.replied': '已回复',
+    'chart.failed': '失败',
+    'chart.total': '总计',
+    'chart.noData': '无数据',
+    'chart.messages': '条消息',
+
+    // Admin Dashboard - Credits Overview - 管理员仪表板 - 余额概览
+    'admin.creditsOverview': '余额概览',
+    'admin.vendorBalance': '供应商余额',
+    'admin.allocatedCredits': '已分配余额',
+    'admin.remainingCredits': '剩余余额',
+    'admin.currentBalance': '当前余额',
+    'admin.sumClientCredits': '所有客户余额总和',
+    'admin.vendorMinusAllocated': '供应商余额 - 已分配',
+    'admin.smsCapacity': '短信容量',
+    'admin.reconcile': '对账',
+    'admin.inSync': '已同步',
+    'admin.needsReconcile': '需要对账',
+    'admin.payPerUse': '按使用付费',
+    'admin.prepaidCredit': '预付余额 - 按短信计费',
+    'admin.unlimitedCapacity': '无限容量（预付）',
+    'admin.pooledBalance': '您组内主管的共享余额',
+    'admin.supervisorPooled': '主管共享减已分配（组）',
+
+    // Admin Dashboard - Stats - 管理员仪表板 - 统计
+    'admin.user': '用户',
+    'admin.loggedInAs': '已登录为',
+    'admin.maintenance': '维护',
+    'admin.maintenanceMode': '系统维护中',
+    'admin.vendor': '供应商',
+    'admin.noVendor': '无供应商',
+    'admin.restarts': '重启次数',
+    'admin.loading': '加载中...',
+    'admin.connectionError': '连接错误',
+    'admin.retryNeeded': '需要重试',
+    'admin.fetchingProfile': '获取配置中...',
+    'admin.unknown': '未知',
+    'admin.credits': '余额',
+    'admin.active': '活跃',
+    'admin.refreshWebhookStatus': '刷新Webhook状态',
+
+    // Inbox - 收件箱
+    'inbox.retrieveNow': '立即获取收件箱',
+    'inbox.viewAndReply': '查看并回复消息',
+
+    // Navigation cards - 导航卡片
+    'nav.contacts': '联系人',
+    'nav.contacts.description': '管理您的联系人列表',
+    'nav.messageHistory': '消息历史',
+    'nav.messageHistory.description': '跟踪发送状态和历史记录',
+
+    // Message Status Tiles - 消息状态瓦片
+    'tiles.messageStatusAllTime': '消息状态 - 所有时间',
+    'tiles.messageStatusToday': '消息状态 - 今日',
+    'tiles.totalOutbound': '总发送量',
+    'tiles.uniqueReplies': '唯一回复',
+    'tiles.carrierConfirmed': '运营商已确认发送',
+    'tiles.sentToCarrier': '已发送到运营商，无回执',
+    'tiles.uniqueFirstReplies': '唯一客户首次回复',
+    'tiles.notReceived': '未收到',
+    'tiles.optOuts': '退订',
+    'tiles.stopKeyword': '收到STOP关键词'
   }
 }
 

@@ -53,6 +53,7 @@ export class NumberPoolManager {
         await client.query('BEGIN');
 
         // 1. Check sticky assignment and lock that number row (only if user exists)
+        // Also respect hourly limits to prevent burst patterns
         let existing: any = null;
         if (userExists) {
           existing = await client.query<NumberAssignment>(`
@@ -62,6 +63,7 @@ export class NumberPoolManager {
             WHERE na.user_id = $1 AND na.recipient_phone = $2
             AND an.status IN ('active', 'warming')
             AND an.sent_today < an.daily_limit
+            AND COALESCE(an.sent_this_hour, 0) < COALESCE(an.hourly_limit, 50)
             LIMIT 1
             FOR UPDATE
           `, [userId, recipientPhone]);
@@ -71,19 +73,13 @@ export class NumberPoolManager {
           const assigned = existing.rows[0] as any;
           console.log(`[NumberPool] Using sticky routing: ${assigned.assigned_number} for ${userId} → ${recipientPhone}`);
 
-          // Atomically increment usage for the assigned number
+          // Don't increment counter yet - wait for actual send success
+          // Just update last_used_at to mark as "in use"
           await client.query(`
             UPDATE anveo_numbers
-            SET sent_today = sent_today + 1, last_used_at = NOW()
+            SET last_used_at = NOW()
             WHERE phone_number = $1
           `, [assigned.assigned_number]);
-
-          // Update assignment usage
-          await client.query(`
-            UPDATE number_assignments
-            SET last_used_at = NOW(), message_count = message_count + 1
-            WHERE user_id = $1 AND recipient_phone = $2
-          `, [userId, recipientPhone]);
 
           await client.query('COMMIT');
           return {
@@ -93,11 +89,13 @@ export class NumberPoolManager {
         }
 
         // 2. No sticky assignment - atomically select least-used available number
+        // Also respect hourly limits to prevent burst patterns (anti-detection)
         const selectRes = await client.query<NumberPoolEntry>(`
           SELECT id, phone_number, worker_url, sent_today, daily_limit
           FROM anveo_numbers
           WHERE status IN ('active', 'warming')
             AND sent_today < daily_limit
+            AND COALESCE(sent_this_hour, 0) < COALESCE(hourly_limit, 50)
           ORDER BY sent_today ASC, complaints ASC, last_used_at ASC NULLS FIRST
           FOR UPDATE SKIP LOCKED
           LIMIT 1
@@ -116,16 +114,17 @@ export class NumberPoolManager {
         if (userExists) {
           await client.query(`
             INSERT INTO number_assignments (user_id, recipient_phone, assigned_number, last_used_at, message_count)
-            VALUES ($1, $2, $3, NOW(), 1)
+            VALUES ($1, $2, $3, NOW(), 0)
             ON CONFLICT (user_id, recipient_phone) DO UPDATE
-            SET last_used_at = NOW(), message_count = number_assignments.message_count + 1
+            SET last_used_at = NOW()
           `, [userId, recipientPhone, selected.phone_number]);
         }
 
-        // Atomically increment usage for the selected number
+        // Don't increment counter yet - wait for actual send success
+        // Just update last_used_at to mark as "in use"
         await client.query(`
           UPDATE anveo_numbers
-          SET sent_today = sent_today + 1, last_used_at = NOW()
+          SET last_used_at = NOW()
           WHERE id = $1
         `, [selected.id]);
 
@@ -159,18 +158,36 @@ export class NumberPoolManager {
   }
 
   /**
-   * Increment sent_today counter and update last_used_at
+   * Confirm number was successfully used - increment counters ONLY after successful send
    */
-  private async incrementNumberUsage(phoneNumber: string): Promise<void> {
+  async confirmNumberUsage(phoneNumber: string, userId?: string, recipientPhone?: string): Promise<void> {
     const pool = getDbPool();
     if (!pool) return;
-    await pool.query(`
-      UPDATE anveo_numbers
-      SET 
-        sent_today = sent_today + 1,
-        last_used_at = NOW()
-      WHERE phone_number = $1
-    `, [phoneNumber]);
+    
+    try {
+      // Increment daily and hourly counters
+      await pool.query(`
+        UPDATE anveo_numbers
+        SET 
+          sent_today = sent_today + 1,
+          sent_this_hour = COALESCE(sent_this_hour, 0) + 1,
+          last_used_at = NOW()
+        WHERE phone_number = $1
+      `, [phoneNumber]);
+
+      // Update assignment message count if this was a sticky route
+      if (userId && recipientPhone) {
+        await pool.query(`
+          UPDATE number_assignments
+          SET message_count = message_count + 1
+          WHERE user_id = $1 AND recipient_phone = $2
+        `, [userId, recipientPhone]);
+      }
+
+      console.log(`[NumberPool] ✅ Confirmed usage for ${phoneNumber}`);
+    } catch (error: any) {
+      console.error(`[NumberPool] Error confirming number usage:`, error?.message || error);
+    }
   }
 
   /**
@@ -229,6 +246,33 @@ export class NumberPoolManager {
       ON CONFLICT (phone_number) DO NOTHING
     `, [phoneNumber, source]);
     console.log(`[NumberPool] Opted out: ${phoneNumber} via ${source}`);
+  }
+
+  /**
+   * Check and auto-suspend numbers with high complaint rates
+   * Called after complaint is recorded
+   */
+  async checkAndSuspendHighComplaintNumbers(): Promise<void> {
+    const pool = getDbPool();
+    if (!pool) return;
+    
+    // Suspend numbers with more than 5 complaints OR complaint rate > 2%
+    const result = await pool.query(`
+      UPDATE anveo_numbers 
+      SET status = 'suspended'
+      WHERE status IN ('active', 'warming')
+        AND (
+          complaints >= 5
+          OR (sent_lifetime > 100 AND (complaints::decimal / sent_lifetime * 100) > 2.0)
+        )
+      RETURNING phone_number, complaints, sent_lifetime
+    `);
+    
+    if (result.rows.length > 0) {
+      for (const row of result.rows) {
+        console.log(`[NumberPool] AUTO-SUSPENDED ${row.phone_number} - complaints: ${row.complaints}, lifetime sends: ${row.sent_lifetime}`);
+      }
+    }
   }
 
   /**

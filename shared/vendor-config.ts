@@ -14,6 +14,7 @@ export interface SMSMessage {
   recipient: string;
   message: string;
   sender?: string;
+  userId?: string;  // Required for sticky routing - ensures same number for conversation threads
 }
 
 export interface SMSResult {

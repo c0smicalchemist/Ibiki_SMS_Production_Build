@@ -1,18 +1,19 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useLanguage } from "@/contexts/LanguageContext";
-import { CheckCircle, Send, XCircle, MessageSquare, Inbox, Reply } from "lucide-react";
-
-// API Status definitions - Delivered, Sent, Replied, Failed
-const STATUS_CONFIG = {
-  delivered: { label: 'Delivered', description: 'Carrier has confirmed sending', icon: CheckCircle, color: 'text-green-600', bg: 'bg-green-50 dark:bg-green-950/30', border: 'border-green-200 dark:border-green-800', chartColor: '#10b981' },
-  sent: { label: 'Sent', description: 'Sent to carrier, receipt unavailable', icon: Send, color: 'text-blue-600', bg: 'bg-blue-50 dark:bg-blue-950/30', border: 'border-blue-200 dark:border-blue-800', chartColor: '#3b82f6' },
-  replied: { label: 'Replied', description: 'Unique client first replies', icon: Reply, color: 'text-purple-600', bg: 'bg-purple-50 dark:bg-purple-950/30', border: 'border-purple-200 dark:border-purple-800', chartColor: '#8b5cf6' },
-  failed: { label: 'Failed', description: 'Not received', icon: XCircle, color: 'text-red-600', bg: 'bg-red-50 dark:bg-red-950/30', border: 'border-red-200 dark:border-red-800', chartColor: '#ef4444' },
-};
+import { CheckCircle, Send, XCircle, MessageSquare, Inbox, Reply, Ban } from "lucide-react";
 
 export default function MessageStatusTiles({ userId }: { userId?: string }) {
   const { t } = useLanguage();
+
+  // API Status definitions - Delivered, Sent, Replied, Failed, OptOut
+  const STATUS_CONFIG = {
+    delivered: { label: t('chart.delivered'), description: t('tiles.carrierConfirmed'), icon: CheckCircle, color: 'text-green-600', bg: 'bg-green-50 dark:bg-green-950/30', border: 'border-green-200 dark:border-green-800', chartColor: '#10b981' },
+    sent: { label: t('chart.sent'), description: t('tiles.sentToCarrier'), icon: Send, color: 'text-blue-600', bg: 'bg-blue-50 dark:bg-blue-950/30', border: 'border-blue-200 dark:border-blue-800', chartColor: '#3b82f6' },
+    replied: { label: t('chart.replied'), description: t('tiles.uniqueFirstReplies'), icon: Reply, color: 'text-purple-600', bg: 'bg-purple-50 dark:bg-purple-950/30', border: 'border-purple-200 dark:border-purple-800', chartColor: '#8b5cf6' },
+    failed: { label: t('chart.failed'), description: t('tiles.notReceived'), icon: XCircle, color: 'text-red-600', bg: 'bg-red-50 dark:bg-red-950/30', border: 'border-red-200 dark:border-red-800', chartColor: '#ef4444' },
+    optout: { label: t('tiles.optOuts'), description: t('tiles.stopKeyword'), icon: Ban, color: 'text-orange-600', bg: 'bg-orange-50 dark:bg-orange-950/30', border: 'border-orange-200 dark:border-orange-800', chartColor: '#f97316' },
+  };
 
   const { data: logsData } = useQuery<{ success: boolean; messages: Array<any> }>({
     queryKey: [userId ? '/api/admin/messages' : '/api/client/messages', userId],
@@ -37,6 +38,18 @@ export default function MessageStatusTiles({ userId }: { userId?: string }) {
       return r.json();
     },
     refetchInterval: 10000,
+  });
+
+  // Fetch opt-out count from number pool stats
+  const { data: poolStats } = useQuery<{ numbers: any[]; stats: { total_opt_outs?: number } }>({
+    queryKey: ['/api/admin/number-pool'],
+    queryFn: async () => {
+      const token = localStorage.getItem('token');
+      const r = await fetch('/api/admin/number-pool', { headers: token ? { 'Authorization': `Bearer ${token}` } : {} });
+      if (!r.ok) return { numbers: [], stats: {} };
+      return r.json();
+    },
+    refetchInterval: 30000, // Less frequent refresh
   });
 
   const logs = (logsData?.messages || []).map((m: any) => ({
@@ -79,6 +92,9 @@ export default function MessageStatusTiles({ userId }: { userId?: string }) {
     return uniquePhones.size;
   };
 
+  // Total opt-outs from pool stats
+  const totalOptOuts = poolStats?.stats?.total_opt_outs || 0;
+
   // Calculate status breakdown for all time
   const statusBreakdown = logs.reduce((acc, l) => {
     const status = normalizeStatus(l.status);
@@ -88,6 +104,8 @@ export default function MessageStatusTiles({ userId }: { userId?: string }) {
 
   // Add replied count (unique first-time client replies)
   statusBreakdown.replied = getUniqueRepliedCount(inboxMessages);
+  // Add opt-out count
+  statusBreakdown.optout = totalOptOuts;
 
   // Calculate status breakdown for today
   const todayLogs = logs.filter(l => l.createdAt >= startOfToday);
@@ -99,6 +117,8 @@ export default function MessageStatusTiles({ userId }: { userId?: string }) {
 
   // Add today's replied count
   todayStatusBreakdown.replied = getUniqueRepliedCount(inboxMessages, startOfToday);
+  // Add opt-outs (we don't have today-only count, so show total)
+  todayStatusBreakdown.optout = totalOptOuts;
 
   // Totals
   const totalOutbound = (statusBreakdown.delivered || 0) + (statusBreakdown.sent || 0) + (statusBreakdown.failed || 0);
@@ -127,10 +147,10 @@ export default function MessageStatusTiles({ userId }: { userId?: string }) {
     );
   };
 
-  // Status breakdown grid - 4 columns: Delivered, Sent, Replied, Failed
+  // Status breakdown grid - 5 columns: Delivered, Sent, Replied, Failed, Opt-Outs
   const StatusBreakdownList = ({ breakdown }: { breakdown: Record<string, number> }) => (
-    <div className="grid grid-cols-4 gap-2 mt-3">
-      {(['delivered', 'sent', 'replied', 'failed'] as const).map(status => {
+    <div className="grid grid-cols-5 gap-2 mt-3">
+      {(['delivered', 'sent', 'replied', 'failed', 'optout'] as const).map(status => {
         const config = STATUS_CONFIG[status];
         const Icon = config.icon;
         const count = breakdown[status] || 0;
@@ -152,7 +172,7 @@ export default function MessageStatusTiles({ userId }: { userId?: string }) {
         <CardHeader className="pb-2">
           <CardTitle className="text-base font-medium flex items-center gap-2">
             <MessageSquare className="h-4 w-4 text-blue-600" />
-            Message Status - All Time
+            {t('tiles.messageStatusAllTime')}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -160,13 +180,13 @@ export default function MessageStatusTiles({ userId }: { userId?: string }) {
           <div className="grid grid-cols-2 gap-3">
             <div className="p-3 rounded-lg border bg-muted/30">
               <div className="text-xs text-muted-foreground flex items-center gap-1.5">
-                <Send className="h-3 w-3" /> Total Outbound
+                <Send className="h-3 w-3" /> {t('tiles.totalOutbound')}
               </div>
               <div className="text-2xl font-bold">{totalOutbound.toLocaleString()}</div>
             </div>
             <div className="p-3 rounded-lg border bg-purple-50 dark:bg-purple-950/30">
               <div className="text-xs text-purple-600 flex items-center gap-1.5">
-                <Reply className="h-3 w-3" /> Unique Replies
+                <Reply className="h-3 w-3" /> {t('tiles.uniqueReplies')}
               </div>
               <div className="text-2xl font-bold text-purple-700 dark:text-purple-400">{totalReplied.toLocaleString()}</div>
             </div>
@@ -185,7 +205,7 @@ export default function MessageStatusTiles({ userId }: { userId?: string }) {
         <CardHeader className="pb-2">
           <CardTitle className="text-base font-medium flex items-center gap-2">
             <MessageSquare className="h-4 w-4 text-blue-600" />
-            Message Status - Today
+            {t('tiles.messageStatusToday')}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -193,13 +213,13 @@ export default function MessageStatusTiles({ userId }: { userId?: string }) {
           <div className="grid grid-cols-2 gap-3">
             <div className="p-3 rounded-lg border bg-muted/30">
               <div className="text-xs text-muted-foreground flex items-center gap-1.5">
-                <Send className="h-3 w-3" /> Total Outbound
+                <Send className="h-3 w-3" /> {t('tiles.totalOutbound')}
               </div>
               <div className="text-2xl font-bold">{todayOutbound.toLocaleString()}</div>
             </div>
             <div className="p-3 rounded-lg border bg-purple-50 dark:bg-purple-950/30">
               <div className="text-xs text-purple-600 flex items-center gap-1.5">
-                <Reply className="h-3 w-3" /> Unique Replies
+                <Reply className="h-3 w-3" /> {t('tiles.uniqueReplies')}
               </div>
               <div className="text-2xl font-bold text-purple-700 dark:text-purple-400">{todayReplied.toLocaleString()}</div>
             </div>

@@ -487,8 +487,8 @@ export class VendorService {
       
       // Map TextBelt response to proper status values per documentation:
       // DELIVERED, SENT, SENDING, FAILED, UNKNOWN
-      // TextBelt returns success: true when queued/sent, so initial status is SENDING
-      let initialStatus = 'SENDING';
+      // TextBelt returns success: true when queued/sent - mark as SENT since DLRs are not always available
+      let initialStatus = 'SENT';
       if (!data.success) {
         initialStatus = 'FAILED';
       }
@@ -569,7 +569,9 @@ export class VendorService {
       }
 
       // Select number from pool (sticky routing for conversation continuity)
-      const userId = (message as any).userId || 'system';
+      // Check both direct userId and customData.userId for compatibility with SMSMessageEnhanced
+      const userId = (message as any).userId || (message as any).customData?.userId || 'system';
+      console.log(`[Anveo] Sticky routing: userId=${userId}, recipient=${message.recipient}`);
       const numberSelection = await numberPoolManager.selectNumber(userId, message.recipient);
       
       if (!numberSelection) {
@@ -585,7 +587,7 @@ export class VendorService {
 
       selectedNumber = numberSelection.number;
       workerUrl = numberSelection.worker_url;
-      console.log(`[Anveo] Selected from pool: ${selectedNumber}, worker: ${workerUrl}`);
+      console.log(`[Anveo] Sticky routing selected: ${selectedNumber} for user ${userId} → ${message.recipient}`);
 
       // === STEP 2: API KEY SELECTION (EXISTING LOGIC) ===
       // Support pool of Anveo keys stored in vendor_api_key_pool with SMART ROTATION
@@ -623,16 +625,24 @@ export class VendorService {
         throw new Error('No from_number selected from pool - this should not happen');
       }
 
+      // Anveo API expects phone numbers WITHOUT the + prefix
+      const cleanFrom = fromNumber.replace(/^\+/, '');
+      const cleanDest = message.recipient.replace(/^\+/, '');
+
       const params: any = {
         apikey: apiKey,
         action: 'sms',
-        destination: message.recipient,
+        destination: cleanDest,
         message: message.message,
       };
 
-      if (fromNumber) params.from = fromNumber;
+      if (cleanFrom) params.from = cleanFrom;
 
-      console.log(`[Anveo Send] Sending to ${message.recipient} from ${fromNumber || 'default'}`);
+      // Anti-detection: Add random jitter (100-800ms) to make sending pattern look natural
+      const jitterMs = Math.floor(Math.random() * 700) + 100;
+      await new Promise(resolve => setTimeout(resolve, jitterMs));
+
+      console.log(`[Anveo Send] Sending to ${cleanDest} from ${cleanFrom || 'default'} (jitter: ${jitterMs}ms)`);
       
       // Anveo supports GET and POST; use GET for simplicity
       const response = await axios.get('https://www.anveo.com/api/v1.asp', { params, timeout: 15000 });
@@ -654,11 +664,20 @@ export class VendorService {
       // Record usage for smart key rotation
       recordKeyUsage(selectedKeyId, success);
 
+      // CRITICAL: Only increment number usage counter AFTER successful send
+      if (success && selectedNumber) {
+        const userId = (message as any).userId || (message as any).customData?.userId || 'system';
+        await numberPoolManager.confirmNumberUsage(selectedNumber, userId, message.recipient);
+      }
+
+      // Anveo is fire-and-forget: no DLR webhook or status API available.
+      // If Anveo accepts the message (result=success), mark as DELIVERED immediately
+      // since there's no way to poll or receive delivery confirmation later.
       return {
         success,
         messageId: smsid,
         vendorMessageId: smsid,
-        status: success ? 'SENT' : 'FAILED',
+        status: success ? 'DELIVERED' : 'FAILED',
         cost: fee || 0,
         vendor: 'anveo',
         error: map['error'] || undefined,
@@ -826,6 +845,34 @@ async checkVendorHealth(vendor: SMSVendor): Promise<{ healthy: boolean; reason?:
         };
       }
 
+      // Anveo vendor health check
+      if (vendor.type === 'anveo') {
+        try {
+          const apiKey = vendor.config.apiKey || process.env.ANVEO_API_KEY || '';
+          if (!apiKey) {
+            return { healthy: false, reason: 'Anveo API key not configured' };
+          }
+          const response = await axios.get(
+            `https://www.anveo.com/api/v2.asp?apikey=${apiKey}&action=account.balance`,
+            { timeout: 10000 }
+          );
+          // Anveo returns XML: <RESPONSE><RESULT>balance</RESULT></RESPONSE>
+          const balanceMatch = String(response.data).match(/<RESULT>([\d.]+)<\/RESULT>/);
+          if (balanceMatch) {
+            const balance = parseFloat(balanceMatch[1]);
+            const creditsEstimate = Math.floor(balance / 0.01); // $0.01 per SMS
+            return { 
+              healthy: balance > 0, 
+              quota: creditsEstimate,
+              reason: balance <= 0 ? 'No balance remaining' : undefined
+            };
+          }
+          return { healthy: true, reason: 'Balance check returned non-standard format' };
+        } catch (e: any) {
+          return { healthy: false, reason: `Anveo API error: ${e?.message || String(e)}` };
+        }
+      }
+
       return { healthy: false, reason: 'Unknown vendor type' };
     } catch (error: any) {
       return { healthy: false, reason: error?.message || String(error) };
@@ -852,6 +899,17 @@ async checkVendorHealth(vendor: SMSVendor): Promise<{ healthy: boolean; reason?:
           status: response.data.status || 'UNKNOWN',
           delivered: response.data.status === 'delivered',
           error: response.data.error
+        };
+      }
+
+      // Anveo doesn't provide a status API, so we assume sent = delivered for now
+      if (vendor.type === 'anveo') {
+        // Anveo doesn't have delivery status API - messages are fire-and-forget
+        // If they accepted the message, it's delivered. The messageId format is: smsid from Anveo
+        return {
+          status: 'DELIVERED',
+          delivered: true, // Anveo accepted = delivered
+          error: undefined
         };
       }
 

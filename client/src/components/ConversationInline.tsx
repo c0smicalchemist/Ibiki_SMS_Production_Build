@@ -4,10 +4,11 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Send } from "lucide-react";
+import { Send, Ban } from "lucide-react";
 import { format } from "date-fns";
 import { Badge } from "@/components/ui/badge";
 import { useLanguage } from "@/contexts/LanguageContext";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 
 interface Message {
   id: string;
@@ -81,6 +82,9 @@ export default function ConversationInline({ phoneNumber, userId, isAdmin, inbox
     const anyOut = out.some((m: any) => /blacklist|blocked/i.test(String(m.status||'')));
     return anyInc || anyOut;
   })();
+
+  // Check if this number has opted out (STOP keyword)
+  const isOptedOut = (conversationData as any)?.isOptedOut === true;
 
   const markReadMutation = useMutation({
     mutationFn: async () => {
@@ -166,6 +170,7 @@ export default function ConversationInline({ phoneNumber, userId, isAdmin, inbox
             {lastInbound?.usedmodem && <Badge variant="secondary" className="text-xs">{t('inbox.label.modem')}: {String(lastInbound.usedmodem)}</Badge>}
             {lastInbound?.port && <Badge variant="secondary" className="text-xs">{t('inbox.label.port')}: {String(lastInbound.port)}</Badge>}
             {hasBlacklisted && <Badge variant="destructive" className="text-xs">Blacklisted</Badge>}
+            {isOptedOut && <Badge variant="destructive" className="text-xs flex items-center gap-1"><Ban className="h-3 w-3" />Opted Out</Badge>}
           </div>
         </div>
         <div className="flex items-center gap-2"></div>
@@ -197,19 +202,30 @@ export default function ConversationInline({ phoneNumber, userId, isAdmin, inbox
       </div>
 
       <div className="border-t pt-2">
-        <div className="flex gap-2">
-          <Textarea
-            value={replyText}
-            onChange={(e) => setReplyText(e.target.value)}
-            placeholder={t('inbox.typeReply')}
-            className="flex-1 min-h-[60px] max-h-[120px] resize-none"
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (replyText.trim()) replyMutation.mutate({ to: phoneNumber, message: replyText, userId, ...(isAdminDirectMode ? { adminDirect: true } : {}), ...(lastInbound?.usedmodem ? { usemodem: String(lastInbound.usedmodem) } : {}), ...(lastInbound?.port ? { port: String(lastInbound.port) } : {}) }); } }}
-          />
-          <Button onClick={() => replyText.trim() && replyMutation.mutate({ to: phoneNumber, message: replyText, userId, ...(isAdminDirectMode ? { adminDirect: true } : {}), ...(lastInbound?.usedmodem ? { usemodem: String(lastInbound.usedmodem) } : {}), ...(lastInbound?.port ? { port: String(lastInbound.port) } : {}) })} disabled={replyMutation.isPending || !replyText.trim()} size="icon" className="h-[60px] w-[60px]">
-            <Send className="h-4 w-4" />
-          </Button>
-        </div>
-        <p className="text-xs text-muted-foreground mt-2">{t('inbox.pressEnterToSend')}</p>
+        {isOptedOut ? (
+          <Alert variant="destructive" className="mb-2">
+            <Ban className="h-4 w-4" />
+            <AlertDescription>
+              This number has opted out by replying STOP. Sending is blocked for compliance.
+            </AlertDescription>
+          </Alert>
+        ) : (
+          <>
+            <div className="flex gap-2">
+              <Textarea
+                value={replyText}
+                onChange={(e) => setReplyText(e.target.value)}
+                placeholder={t('inbox.typeReply')}
+                className="flex-1 min-h-[60px] max-h-[120px] resize-none"
+                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (replyText.trim()) replyMutation.mutate({ to: phoneNumber, message: replyText, userId, ...(isAdminDirectMode ? { adminDirect: true } : {}), ...(lastInbound?.usedmodem ? { usemodem: String(lastInbound.usedmodem) } : {}), ...(lastInbound?.port ? { port: String(lastInbound.port) } : {}) }); } }}
+              />
+              <Button onClick={() => replyText.trim() && replyMutation.mutate({ to: phoneNumber, message: replyText, userId, ...(isAdminDirectMode ? { adminDirect: true } : {}), ...(lastInbound?.usedmodem ? { usemodem: String(lastInbound.usedmodem) } : {}), ...(lastInbound?.port ? { port: String(lastInbound.port) } : {}) })} disabled={replyMutation.isPending || !replyText.trim()} size="icon" className="h-[60px] w-[60px]">
+                <Send className="h-4 w-4" />
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground mt-2">{t('inbox.pressEnterToSend')}</p>
+          </>
+        )}
       </div>
     </div>
   );

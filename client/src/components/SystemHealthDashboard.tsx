@@ -22,7 +22,10 @@ import {
   Send,
   FlaskConical,
   Link,
-  Save
+  Save,
+  Phone,
+  Ban,
+  TrendingUp
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
@@ -68,6 +71,34 @@ interface ProxyStatus {
   }>;
 }
 
+interface AnveoStatus {
+  isConfigured: boolean;
+  error?: string;
+  numbers?: {
+    active: number;
+    warming: number;
+    suspended: number;
+  };
+  capacity?: {
+    dailyLimit: number;
+    sentToday: number;
+    remaining: number;
+  };
+  health?: {
+    errorsToday: number;
+    successToday: number;
+    successRate: number;
+  };
+  compliance?: {
+    complaints: number;
+    optOuts: number;
+  };
+  apiKeys?: {
+    active: number;
+    total: number;
+  };
+}
+
 interface SystemHealthData {
   api: HealthStatus | null;
   liveness: { status: string } | null;
@@ -80,6 +111,7 @@ interface SystemHealthData {
     userCount: number;
   } | null;
   textbeltQuota: number | null;
+  anveo: AnveoStatus | null;
 }
 
 const StatusBadge = ({ status, label }: { status: 'success' | 'warning' | 'error' | 'unknown'; label: string }) => {
@@ -559,6 +591,93 @@ export default function SystemHealthDashboard() {
               value="Passing" 
               icon={CheckCircle}
               status="success"
+            />
+          </CardContent>
+        </Card>
+
+        {/* Anveo Status */}
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-medium flex items-center gap-2">
+                <Phone className="w-4 h-4" />
+                Anveo SMS
+              </CardTitle>
+              <StatusBadge 
+                status={healthData?.anveo?.isConfigured ? 'success' : 'warning'} 
+                label={healthData?.anveo?.isConfigured ? 'Active' : 'Not Configured'} 
+              />
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <StatCard 
+              title="Active Numbers" 
+              value={healthData?.anveo?.numbers?.active || 0} 
+              icon={Phone}
+              status={(healthData?.anveo?.numbers?.active || 0) > 0 ? 'success' : 'error'}
+            />
+            <StatCard 
+              title="Daily Capacity" 
+              value={`${healthData?.anveo?.capacity?.sentToday || 0}/${healthData?.anveo?.capacity?.dailyLimit || 0}`} 
+              icon={Send}
+              status={(healthData?.anveo?.capacity?.remaining || 0) > 100 ? 'success' : 
+                     (healthData?.anveo?.capacity?.remaining || 0) > 0 ? 'warning' : 'error'}
+            />
+            <StatCard 
+              title="Success Rate" 
+              value={`${healthData?.anveo?.health?.successRate || 100}%`} 
+              icon={TrendingUp}
+              status={(healthData?.anveo?.health?.successRate || 100) >= 95 ? 'success' : 
+                     (healthData?.anveo?.health?.successRate || 100) >= 80 ? 'warning' : 'error'}
+            />
+            <StatCard 
+              title="Opt-Outs" 
+              value={healthData?.anveo?.compliance?.optOuts || 0} 
+              icon={Ban}
+              status={(healthData?.anveo?.compliance?.optOuts || 0) === 0 ? 'success' : 'warning'}
+            />
+          </CardContent>
+        </Card>
+
+        {/* Anveo Detailed Stats */}
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-medium flex items-center gap-2">
+                <Activity className="w-4 h-4" />
+                Anveo Details
+              </CardTitle>
+              <StatusBadge 
+                status={(healthData?.anveo?.compliance?.complaints || 0) === 0 ? 'success' : 'warning'} 
+                label={`${healthData?.anveo?.compliance?.complaints || 0} complaints`} 
+              />
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <StatCard 
+              title="Warming Numbers" 
+              value={healthData?.anveo?.numbers?.warming || 0} 
+              icon={Clock}
+              status="success"
+            />
+            <StatCard 
+              title="Suspended Numbers" 
+              value={healthData?.anveo?.numbers?.suspended || 0} 
+              icon={AlertTriangle}
+              status={(healthData?.anveo?.numbers?.suspended || 0) === 0 ? 'success' : 'error'}
+            />
+            <StatCard 
+              title="API Keys Active" 
+              value={`${healthData?.anveo?.apiKeys?.active || 0}/${healthData?.anveo?.apiKeys?.total || 0}`} 
+              icon={Zap}
+              status={(healthData?.anveo?.apiKeys?.active || 0) > 0 ? 'success' : 'error'}
+            />
+            <StatCard 
+              title="Errors Today" 
+              value={healthData?.anveo?.health?.errorsToday || 0} 
+              icon={XCircle}
+              status={(healthData?.anveo?.health?.errorsToday || 0) === 0 ? 'success' : 
+                     (healthData?.anveo?.health?.errorsToday || 0) < 10 ? 'warning' : 'error'}
             />
           </CardContent>
         </Card>

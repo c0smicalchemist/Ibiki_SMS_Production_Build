@@ -22,6 +22,7 @@ function looksLikePhone(val: any): boolean {
 
 import { VendorService } from "./vendor-service";
 import { VendorManager } from "./vendor-manager";
+import { numberPoolManager } from "./number-pool-manager";
 import vendorRoutes from "./routes/vendor-routes";
 import queueRoutes from "./routes/queue-routes";
 import { startSMSWorker } from "./sms-worker";
@@ -195,10 +196,21 @@ async function canSendSingle(req: any) {
       return String(cfg?.value || '').trim() === 'true';
     } catch { return false; }
   }
+  // Check all-users override for any user
+  try {
+    const allUsersCfg = await storage.getSystemConfig('routes_override_all_users');
+    if (String(allUsersCfg?.value || '').trim() === 'true') return true;
+  } catch { /* ignore */ }
   return false;
 }
-function canSendBulk() {
-  return isRoutesOpenNow();
+async function canSendBulk(req: any) {
+  if (isRoutesOpenNow()) return true;
+  // Check all-users override for any user (allows bulk when enabled)
+  try {
+    const allUsersCfg = await storage.getSystemConfig('routes_override_all_users');
+    if (String(allUsersCfg?.value || '').trim() === 'true') return true;
+  } catch { /* ignore */ }
+  return false;
 }
 function isAfterClosedEst(d: Date) {
   try {
@@ -210,7 +222,7 @@ function isAfterClosedEst(d: Date) {
   } catch { return false; }
 }
 function closedMessage() {
-  return { error: 'Routes Closed', details: 'Open after 21:00 GMT-8 and closed after 20:00 GMT-5. Admin/Supervisor may enable single-SMS override.' };
+  return { error: 'Routes Closed', details: 'Open after 21:00 GMT-8 and closed after 20:00 GMT-5. Admin/Supervisor may enable override.' };
 }
 
 // Compliance helper: Apply sender name and opt-out text to messages
@@ -1323,6 +1335,75 @@ Respond ONLY with JSON: {"variants":[{"text":"...","score":0.9,"strategy":"casua
         console.error('[SystemHealth] TextBelt quota error:', quotaError);
       }
 
+      // 7. Anveo Status
+      let anveoStatus = null;
+      try {
+        const pool = getDbPool();
+        
+        // Get number pool stats
+        const numberStatsResult = await pool.query(`
+          SELECT 
+            COUNT(*) FILTER (WHERE status = 'active') as active_numbers,
+            COUNT(*) FILTER (WHERE status = 'warming') as warming_numbers,
+            COUNT(*) FILTER (WHERE status = 'suspended') as suspended_numbers,
+            SUM(daily_limit) FILTER (WHERE status IN ('active', 'warming')) as daily_capacity,
+            SUM(sent_today) as sent_today,
+            SUM(complaints) as total_complaints,
+            SUM(error_count_today) as errors_today,
+            SUM(success_count_today) as success_today
+          FROM anveo_numbers
+        `);
+        
+        // Get opt-out count
+        const optOutResult = await pool.query('SELECT COUNT(*) as count FROM opt_out_registry');
+        
+        // Get API keys count from vendor_api_key_pool
+        const apiKeysResult = await pool.query(`
+          SELECT 
+            COUNT(*) FILTER (WHERE vendor = 'anveo' AND is_active = true) as active_keys,
+            COUNT(*) FILTER (WHERE vendor = 'anveo') as total_keys
+          FROM vendor_api_key_pool
+        `);
+
+        const stats = numberStatsResult.rows[0] || {};
+        const keysStats = apiKeysResult.rows[0] || {};
+        
+        anveoStatus = {
+          isConfigured: parseInt(stats.active_numbers || '0') > 0,
+          numbers: {
+            active: parseInt(stats.active_numbers || '0'),
+            warming: parseInt(stats.warming_numbers || '0'),
+            suspended: parseInt(stats.suspended_numbers || '0'),
+          },
+          capacity: {
+            dailyLimit: parseInt(stats.daily_capacity || '0'),
+            sentToday: parseInt(stats.sent_today || '0'),
+            remaining: parseInt(stats.daily_capacity || '0') - parseInt(stats.sent_today || '0'),
+          },
+          health: {
+            errorsToday: parseInt(stats.errors_today || '0'),
+            successToday: parseInt(stats.success_today || '0'),
+            successRate: (parseInt(stats.success_today || '0') + parseInt(stats.errors_today || '0')) > 0 
+              ? Math.round((parseInt(stats.success_today || '0') / (parseInt(stats.success_today || '0') + parseInt(stats.errors_today || '0'))) * 100)
+              : 100,
+          },
+          compliance: {
+            complaints: parseInt(stats.total_complaints || '0'),
+            optOuts: parseInt(optOutResult.rows[0]?.count || '0'),
+          },
+          apiKeys: {
+            active: parseInt(keysStats.active_keys || '0'),
+            total: parseInt(keysStats.total_keys || '0'),
+          },
+        };
+      } catch (anveoError) {
+        console.error('[SystemHealth] Anveo status error:', anveoError);
+        anveoStatus = {
+          isConfigured: false,
+          error: 'Failed to fetch Anveo status',
+        };
+      }
+
       res.json({
         api: apiHealth,
         liveness,
@@ -1331,6 +1412,7 @@ Respond ONLY with JSON: {"variants":[{"text":"...","score":0.9,"strategy":"casua
         proxy: proxyStatus,
         database: databaseInfo,
         textbeltQuota,
+        anveo: anveoStatus,
       });
     } catch (error: any) {
       console.error('[SystemHealth] Error:', error);
@@ -2730,10 +2812,27 @@ app.get('/api/admin/diagnostics/run', authenticateToken, requireRole(['admin','s
          WHERE first_ts >= $2 AND first_ts < $3`,
         [targetUserId, start.toISOString(), end.toISOString()]
       );
+      
+      // Get today's stats broken down by status
+      const todayByStatus = await pool.query(
+        `SELECT 
+           COALESCE(SUM(CASE WHEN status IN ('sent','queued') THEN COALESCE(message_count,1) ELSE 0 END),0) AS sent,
+           COALESCE(SUM(CASE WHEN status = 'delivered' THEN COALESCE(message_count,1) ELSE 0 END),0) AS delivered,
+           COALESCE(SUM(CASE WHEN status = 'failed' THEN COALESCE(message_count,1) ELSE 0 END),0) AS failed
+         FROM message_logs
+         WHERE user_id = $1 AND created_at >= $2 AND created_at < $3 AND is_example = false`,
+        [targetUserId, start.toISOString(), end.toISOString()]
+      );
+      
       await pool.end();
       const todaySent = Number(sent.rows?.[0]?.c || 0);
       const todayReceivedUnique = Number(received.rows?.[0]?.c || 0);
-      res.json({ success: true, stats: { ...stats, todaySent, todayReceivedUnique } });
+      const todayStats = {
+        sent: Number(todayByStatus.rows?.[0]?.sent || 0),
+        delivered: Number(todayByStatus.rows?.[0]?.delivered || 0),
+        failed: Number(todayByStatus.rows?.[0]?.failed || 0)
+      };
+      res.json({ success: true, stats: { ...stats, todaySent, todayReceivedUnique, todayStats } });
     } catch (error) {
       console.error("Get message status stats error:", error);
       res.status(500).json({ error: "Failed to get message status statistics" });
@@ -4097,7 +4196,7 @@ app.get("/api/admin/config", authenticateToken, async (req: any, res) => {
         const configMap: Record<string, string> = {};
         // Keys visible to all authenticated users (for DashboardHeader, etc)
         const allowedForAll = new Set([
-          'routes_override_allow_single', 'timezone'
+          'routes_override_allow_single', 'routes_override_all_users', 'timezone'
         ]);
         // Additional keys visible to supervisors
         const allowedForSupervisor = new Set([
@@ -4275,7 +4374,8 @@ app.get("/api/admin/config", authenticateToken, async (req: any, res) => {
     }
   });
 
-  // Admin SQL executor for number pool management
+  // Admin SQL executor for number pool management - SECURITY HARDENED
+  // WARNING: This endpoint is inherently dangerous. Consider disabling in production.
   app.post("/api/admin/exec-sql", authenticateToken, requireAdmin, async (req, res) => {
     try {
       const { query } = req.body;
@@ -4284,22 +4384,69 @@ app.get("/api/admin/config", authenticateToken, async (req: any, res) => {
         return res.status(400).json({ error: 'SQL query required' });
       }
 
-      // Whitelist safe read-only queries and specific functions
+      // SECURITY: Comprehensive SQL injection prevention
       const normalizedQuery = query.trim().toLowerCase();
-      const isSelect = normalizedQuery.startsWith('select');
-      const isResetFunction = normalizedQuery.includes('reset_daily_counters()');
       
-      if (!isSelect && !isResetFunction) {
+      // Remove comments and normalize whitespace
+      const cleanedQuery = normalizedQuery
+        .replace(/\/\*[\s\S]*?\*\//g, '') // Remove /* */ comments
+        .replace(/--.*$/gm, '')            // Remove -- comments
+        .replace(/\s+/g, ' ')              // Normalize whitespace
+        .trim();
+      
+      // STRICT VALIDATION: Must start with SELECT (no leading semicolons, comments, etc.)
+      if (!cleanedQuery.match(/^select\s/i)) {
         return res.status(403).json({ 
-          error: 'Only SELECT queries and reset_daily_counters() allowed' 
+          error: 'Only SELECT queries allowed (must start with SELECT)' 
         });
       }
-
+      
+      // SECURITY: Block dangerous keywords anywhere in query
+      const dangerousKeywords = [
+        'insert', 'update', 'delete', 'drop', 'truncate', 'alter', 
+        'create', 'grant', 'revoke', 'exec', 'execute', 'call',
+        'copy', 'pg_', 'information_schema.table_privileges',
+        'set role', 'set session', 'reset all'
+      ];
+      
+      for (const keyword of dangerousKeywords) {
+        // Check for keyword as whole word (with word boundaries)
+        const regex = new RegExp(`\\b${keyword}\\b`, 'i');
+        if (regex.test(cleanedQuery)) {
+          console.warn(`[SECURITY] Blocked SQL with dangerous keyword "${keyword}":`, query.substring(0, 100));
+          return res.status(403).json({ 
+            error: `Query contains forbidden keyword: ${keyword}` 
+          });
+        }
+      }
+      
+      // SECURITY: Block multiple statements (semicolons followed by another statement)
+      if (/;\s*\w/.test(cleanedQuery)) {
+        console.warn('[SECURITY] Blocked multi-statement SQL:', query.substring(0, 100));
+        return res.status(403).json({ 
+          error: 'Multiple SQL statements not allowed' 
+        });
+      }
+      
+      // SECURITY: Block UNION-based attacks (common SQLi technique)
+      if (/\bunion\s+(all\s+)?select\b/i.test(cleanedQuery)) {
+        console.warn('[SECURITY] Blocked UNION SELECT:', query.substring(0, 100));
+        return res.status(403).json({ 
+          error: 'UNION SELECT not allowed' 
+        });
+      }
+      
+      // Allow specific safe function calls
+      const isResetFunction = cleanedQuery === 'select reset_daily_counters()';
+      
       // Execute query using poolInstance
       const pool = getDbPool();
       if (!pool) {
         return res.status(500).json({ error: 'Database not available' });
       }
+      
+      // Log all SQL executions for audit trail
+      console.log(`[SQL-EXEC] Admin executed query: ${query.substring(0, 200)}${query.length > 200 ? '...' : ''}`);
       
       const result = await pool.query(query);
       const rows = result.rows || [];
@@ -4318,11 +4465,25 @@ app.get("/api/admin/config", authenticateToken, async (req: any, res) => {
   });
 
   // Get all numbers in the pool
+  // Get all numbers in the pool (optionally filter by status)
   app.get("/api/admin/number-pool", authenticateToken, requireAdmin, async (req, res) => {
     try {
       const pool = getDbPool();
       if (!pool) {
         return res.status(500).json({ error: 'Database not available' });
+      }
+
+      // Support filtering - default shows active/warming, ?status=suspended for archive
+      const statusFilter = req.query.status as string;
+      const showAll = req.query.all === 'true';
+      
+      let whereClause = '';
+      if (statusFilter === 'suspended') {
+        whereClause = "WHERE status = 'suspended'";
+      } else if (statusFilter === 'archived') {
+        whereClause = "WHERE status IN ('suspended', 'deleted')";
+      } else if (!showAll) {
+        whereClause = "WHERE status IN ('active', 'warming')";
       }
 
       const result = await pool.query(`
@@ -4333,17 +4494,41 @@ app.get("/api/admin/config", authenticateToken, async (req: any, res) => {
           api_key_id,
           status,
           daily_limit,
+          hourly_limit,
           sent_today,
+          sent_this_hour,
+          sent_lifetime,
           complaints,
+          last_complaint_at,
+          error_count_today,
+          success_count_today,
           worker_url,
           warming_day,
+          warming_start_date,
           last_used_at,
           created_at
         FROM anveo_numbers
-        ORDER BY phone_number
+        ${whereClause}
+        ORDER BY status, phone_number
       `);
 
-      res.json({ numbers: result.rows });
+      // Get totals for stats
+      const statsResult = await pool.query(`
+        SELECT 
+          COUNT(*) FILTER (WHERE status = 'active') as active_count,
+          COUNT(*) FILTER (WHERE status = 'warming') as warming_count,
+          COUNT(*) FILTER (WHERE status = 'suspended') as suspended_count,
+          SUM(daily_limit) FILTER (WHERE status IN ('active', 'warming')) as total_daily_capacity,
+          SUM(sent_today) as total_sent_today,
+          SUM(complaints) as total_complaints,
+          (SELECT COUNT(*) FROM opt_out_registry) as total_opt_outs
+        FROM anveo_numbers
+      `);
+
+      res.json({ 
+        numbers: result.rows,
+        stats: statsResult.rows[0] || {}
+      });
     } catch (error: any) {
       console.error('Get number pool error:', error);
       
@@ -4363,7 +4548,7 @@ app.get("/api/admin/config", authenticateToken, async (req: any, res) => {
           warming_day: 1,
           last_used_at: null,
           created_at: new Date().toISOString()
-        }] });
+        }], stats: {} });
       }
       
       res.status(500).json({ error: error.message });
@@ -4453,6 +4638,64 @@ app.get("/api/admin/config", authenticateToken, async (req: any, res) => {
     }
   });
 
+  // =============================================
+  // RAPID SCALING - Bulk update all number limits
+  // Use this to override warming limits for high-volume testing
+  // =============================================
+  app.post("/api/admin/number-pool/scale", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const { daily_limit, hourly_limit, skip_warming } = req.body;
+
+      const pool = getDbPool();
+      if (!pool) {
+        return res.status(500).json({ error: 'Database not available' });
+      }
+
+      const updates: string[] = [];
+      const values: any[] = [];
+      let valueIndex = 1;
+
+      if (daily_limit !== undefined && daily_limit > 0) {
+        updates.push(`daily_limit = $${valueIndex++}`);
+        values.push(daily_limit);
+      }
+      if (hourly_limit !== undefined && hourly_limit > 0) {
+        updates.push(`hourly_limit = $${valueIndex++}`);
+        values.push(hourly_limit);
+      }
+      if (skip_warming === true) {
+        updates.push(`status = 'active'`);
+        updates.push(`warming_day = 30`); // Skip to "warmed" state
+      }
+
+      if (updates.length === 0) {
+        return res.status(400).json({ error: 'Provide daily_limit, hourly_limit, or skip_warming=true' });
+      }
+
+      const result = await pool.query(
+        `UPDATE anveo_numbers SET ${updates.join(', ')} WHERE status IN ('active', 'warming') RETURNING phone_number, daily_limit, hourly_limit, status`,
+        values
+      );
+
+      // Calculate new total capacity
+      const capacityResult = await pool.query('SELECT SUM(daily_limit) as total_capacity FROM anveo_numbers WHERE status IN (\'active\', \'warming\')');
+      const totalCapacity = capacityResult.rows[0]?.total_capacity || 0;
+
+      console.log(`[Admin] Scaled ${result.rows.length} numbers. New total capacity: ${totalCapacity}/day`);
+
+      res.json({ 
+        success: true, 
+        message: `Updated ${result.rows.length} numbers`,
+        numbers_updated: result.rows.length,
+        total_daily_capacity: totalCapacity,
+        updated: result.rows
+      });
+    } catch (error: any) {
+      console.error('Scale numbers error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Delete a number from the pool
   app.delete("/api/admin/number-pool/:id", authenticateToken, requireAdmin, async (req, res) => {
     try {
@@ -4468,6 +4711,188 @@ app.get("/api/admin/config", authenticateToken, async (req: any, res) => {
       res.json({ success: true, message: 'Number deleted successfully' });
     } catch (error: any) {
       console.error('Delete number error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Compliance Reports: Complaints and Opt-Outs
+  app.get("/api/admin/number-pool/compliance-report", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const pool = getDbPool();
+      if (!pool) {
+        return res.status(500).json({ error: 'Database not available' });
+      }
+
+      // Get numbers with complaints (sorted by complaints descending)
+      const complaintsResult = await pool.query(`
+        SELECT 
+          phone_number,
+          status,
+          complaints,
+          sent_lifetime,
+          CASE WHEN sent_lifetime > 0 THEN ROUND((complaints::decimal / sent_lifetime * 100), 2) ELSE 0 END as complaint_rate,
+          last_complaint_at,
+          daily_limit,
+          created_at
+        FROM anveo_numbers
+        WHERE complaints > 0
+        ORDER BY complaints DESC, last_complaint_at DESC
+      `);
+
+      // Get opt-out list
+      const optOutsResult = await pool.query(`
+        SELECT 
+          phone_number,
+          opted_out_at,
+          source,
+          opt_out_message
+        FROM opt_out_registry
+        ORDER BY opted_out_at DESC
+        LIMIT 500
+      `);
+
+      // Get summary stats
+      const statsResult = await pool.query(`
+        SELECT 
+          SUM(complaints) as total_complaints,
+          (SELECT COUNT(*) FROM opt_out_registry) as total_opt_outs,
+          COUNT(*) FILTER (WHERE complaints > 0) as numbers_with_complaints,
+          COUNT(*) FILTER (WHERE status = 'suspended') as suspended_numbers
+        FROM anveo_numbers
+      `);
+
+      res.json({
+        complaints: complaintsResult.rows,
+        optOuts: optOutsResult.rows,
+        summary: statsResult.rows[0] || {}
+      });
+    } catch (error: any) {
+      console.error('Compliance report error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Remove opt-out (Admin only - for testing or legitimate re-consent)
+  app.delete("/api/admin/number-pool/opt-out/:phoneNumber", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const { phoneNumber } = req.params;
+      const pool = getDbPool();
+      if (!pool) {
+        return res.status(500).json({ error: 'Database not available' });
+      }
+
+      await pool.query('DELETE FROM opt_out_registry WHERE phone_number = $1', [phoneNumber]);
+      console.log(`[Admin] Removed opt-out for ${phoneNumber}`);
+      
+      res.json({ success: true, message: `Removed opt-out for ${phoneNumber}` });
+    } catch (error: any) {
+      console.error('Remove opt-out error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Purge all complaints (reset complaint counters)
+  app.post("/api/admin/number-pool/purge-complaints", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const pool = getDbPool();
+      if (!pool) {
+        return res.status(500).json({ error: 'Database not available' });
+      }
+
+      const result = await pool.query(`
+        UPDATE anveo_numbers 
+        SET complaints = 0, last_complaint_at = NULL 
+        WHERE complaints > 0
+      `);
+      console.log(`[Admin] Purged complaints from ${result.rowCount} numbers`);
+      
+      res.json({ success: true, message: `Purged complaints from ${result.rowCount} numbers`, count: result.rowCount });
+    } catch (error: any) {
+      console.error('Purge complaints error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Purge all opt-outs
+  app.post("/api/admin/number-pool/purge-opt-outs", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const pool = getDbPool();
+      if (!pool) {
+        return res.status(500).json({ error: 'Database not available' });
+      }
+
+      const result = await pool.query('DELETE FROM opt_out_registry');
+      console.log(`[Admin] Purged ${result.rowCount} opt-outs`);
+      
+      res.json({ success: true, message: `Purged ${result.rowCount} opt-outs`, count: result.rowCount });
+    } catch (error: any) {
+      console.error('Purge opt-outs error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Download compliance report as CSV
+  app.get("/api/admin/number-pool/compliance-report.csv", authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const pool = getDbPool();
+      if (!pool) {
+        return res.status(500).json({ error: 'Database not available' });
+      }
+
+      const { type = 'all' } = req.query; // 'all', 'complaints', 'opt-outs'
+
+      let csv = '';
+
+      if (type === 'complaints' || type === 'all') {
+        const complaintsResult = await pool.query(`
+          SELECT 
+            phone_number,
+            status,
+            complaints,
+            sent_lifetime,
+            CASE WHEN sent_lifetime > 0 THEN ROUND((complaints::decimal / sent_lifetime * 100), 2) ELSE 0 END as complaint_rate,
+            last_complaint_at,
+            daily_limit,
+            created_at
+          FROM anveo_numbers
+          WHERE complaints > 0
+          ORDER BY complaints DESC
+        `);
+
+        csv += 'COMPLAINTS REPORT\n';
+        csv += 'Phone Number,Status,Complaints,Lifetime Sent,Complaint Rate (%),Last Complaint,Daily Limit,Created At\n';
+        for (const row of complaintsResult.rows) {
+          csv += `${row.phone_number},${row.status},${row.complaints},${row.sent_lifetime},${row.complaint_rate},${row.last_complaint_at || ''},${row.daily_limit},${row.created_at}\n`;
+        }
+        csv += '\n';
+      }
+
+      if (type === 'opt-outs' || type === 'all') {
+        const optOutsResult = await pool.query(`
+          SELECT 
+            phone_number,
+            opted_out_at,
+            source,
+            opt_out_message
+          FROM opt_out_registry
+          ORDER BY opted_out_at DESC
+        `);
+
+        csv += 'OPT-OUT REGISTRY\n';
+        csv += 'Phone Number,Opted Out At,Source,Message\n';
+        for (const row of optOutsResult.rows) {
+          // Escape message field for CSV
+          const message = (row.opt_out_message || '').replace(/"/g, '""');
+          csv += `${row.phone_number},${row.opted_out_at},${row.source},"${message}"\n`;
+        }
+      }
+
+      const date = new Date().toISOString().split('T')[0];
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename=compliance-report-${date}.csv`);
+      res.send(csv);
+    } catch (error: any) {
+      console.error('Compliance CSV error:', error);
       res.status(500).json({ error: error.message });
     }
   });
@@ -4500,7 +4925,7 @@ app.get("/api/admin/config", authenticateToken, async (req: any, res) => {
     }
   });
 
-  // Set routes override (Admin and Supervisor)
+  // Set routes override (Admin and Supervisor single SMS)
   app.post('/api/admin/routes-override', authenticateToken, requireRole(['admin','supervisor']), async (req, res) => {
     try {
       const allow = String(req.body?.allow).toLowerCase();
@@ -4510,6 +4935,19 @@ app.get("/api/admin/config", authenticateToken, async (req: any, res) => {
     } catch (e: any) {
       console.error('Routes override error:', e);
       res.status(500).json({ error: e?.message || 'Failed to set route override' });
+    }
+  });
+
+  // Set routes override for ALL users (single & bulk)
+  app.post('/api/admin/routes-override-all-users', authenticateToken, requireRole(['admin','supervisor']), async (req, res) => {
+    try {
+      const allow = String(req.body?.allow).toLowerCase();
+      const val = (allow === 'true' || allow === '1') ? 'true' : 'false';
+      await storage.setSystemConfig('routes_override_all_users', val);
+      res.json({ success: true, value: val });
+    } catch (e: any) {
+      console.error('Routes override all users error:', e);
+      res.status(500).json({ error: e?.message || 'Failed to set route override for all users' });
     }
   });
 
@@ -5575,6 +6013,36 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
       
       console.log('[Anveo Webhook] Processing SMS from:', from, 'to:', receiver, 'message:', message.substring(0, 100));
       
+      // =============================================
+      // STOP KEYWORD DETECTION - Opt-out Compliance
+      // =============================================
+      const stopKeywords = ['STOP', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT', 'OPTOUT', 'OPT OUT', 'OPT-OUT'];
+      const upperMessage = message.toUpperCase().trim();
+      const isOptOut = stopKeywords.some(kw => upperMessage === kw || upperMessage.startsWith(kw + ' '));
+      
+      if (isOptOut) {
+        console.log(`[Anveo Webhook] STOP keyword detected from ${from} - adding to opt-out registry`);
+        await numberPoolManager.recordOptOut(from, 'sms_reply');
+        
+        // Increment complaint count on the receiver number (our Anveo number)
+        if (receiver) {
+          const pool = getDbPool();
+          if (pool) {
+            await pool.query(`
+              UPDATE anveo_numbers 
+              SET complaints = complaints + 1, last_complaint_at = NOW()
+              WHERE phone_number = $1
+            `, [receiver]);
+            console.log(`[Anveo Webhook] Incremented complaint count for ${receiver}`);
+            
+            // Check if this number should be auto-suspended
+            await numberPoolManager.checkAndSuspendHighComplaintNumbers();
+          }
+        }
+        
+        // Still store the message for audit trail
+      }
+      
       // Find the user who owns this Anveo number or last sent to this "from" number
       let userId: string | undefined = undefined;
       
@@ -5660,7 +6128,8 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
       
       const smsMessage: SMSMessage = {
         recipient: normalizedRecipient,
-        message: message
+        message: message,
+        userId: req.user.userId  // For sticky routing - same number for conversation threads
       };
       
       const result = await vendorService.sendSMS(smsMessage);
@@ -5726,6 +6195,18 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
   });
 
   // Client: reply (normalize + deduct)
+  // Check if a phone number is opted out
+  app.get('/api/web/inbox/opt-out-status/:phoneNumber', authenticateToken, async (req: any, res) => {
+    try {
+      const { phoneNumber } = req.params;
+      const isOptedOut = await numberPoolManager.isOptedOut(phoneNumber);
+      res.json({ phoneNumber, isOptedOut });
+    } catch (error: any) {
+      console.error('Opt-out check error:', error);
+      res.status(500).json({ error: 'Failed to check opt-out status' });
+    }
+  });
+
   app.post('/api/web/inbox/reply', authenticateToken, async (req: any, res) => {
     try {
       const { to, message, userId, defaultDial, adminDirect, supervisorDirect } = req.body || {};
@@ -5733,6 +6214,18 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
       const isSupervisor = req.user.role === 'supervisor';
       const effectiveUserIdPre = req.user.role === 'admin' && userId ? userId : req.user.userId;
       const normalizedToPre = normalizePhone(String(to || ''), String(defaultDial || '+1'));
+      
+      // Block sending to opted-out numbers (STOP keyword compliance)
+      if (normalizedToPre) {
+        const isOptedOut = await numberPoolManager.isOptedOut(normalizedToPre);
+        if (isOptedOut) {
+          return res.status(403).json({ 
+            error: 'This number has opted out of receiving messages (replied STOP). Sending blocked for compliance.',
+            code: 'OPT_OUT_BLOCKED'
+          });
+        }
+      }
+      
       if (!isRoutesOpenNow()) {
         const role = String(req.user?.role || '').toLowerCase();
         let allow = false;
@@ -5768,7 +6261,8 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
       // Use vendorService (supports TextBelt, ExtremeSMS, etc.)
       const smsMessage: SMSMessage = {
         recipient: normalizedTo,
-        message: finalMessage
+        message: finalMessage,
+        userId: effectiveUserId  // For sticky routing - same number for conversation threads
       };
       const result = await vendorService.sendSMS(smsMessage);
       if (!result.success) {
@@ -5789,7 +6283,7 @@ app.get('/api/admin/webhook/status', authenticateToken, requireRole(['admin','su
           1,
           'web-ui-reply',
           result.messageId || `reply-${Date.now()}`,
-          'SENDING',
+          (result.status || (result.success ? 'SENT' : 'FAILED')).toUpperCase(),
           smsMessage,
           result,
           normalizedTo,
@@ -6391,7 +6885,8 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
 
       const smsMessage: SMSMessage = {
         recipient: normalizedRecipient,
-        message: compliantMessage
+        message: compliantMessage,
+        userId: req.user.userId  // For sticky routing - same number for conversation threads
       };
 
       // Use vendor service so active vendor (e.g., TextBelt) is respected
@@ -6472,7 +6967,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
       // Use vendor service for bulk SMS with compliance (send concurrently)
       const sendPromises = normalizedRecipients.map(async (recipient) => {
         const compliantMessage = await applyComplianceToMessage(req.user.userId, recipient, content);
-        const smsMessage: SMSMessage = { recipient, message: compliantMessage };
+        const smsMessage: SMSMessage = { recipient, message: compliantMessage, userId: req.user.userId };
         return vendorService.sendSMS(smsMessage);
       });
       const settled = await Promise.allSettled(sendPromises);
@@ -6547,7 +7042,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
       // Send messages concurrently
       const sendPromises2 = transformed.map(async (message) => {
         const compliantMessage = await applyComplianceToMessage(req.user.userId, message.recipient, message.message);
-        const smsMessage: SMSMessage = { recipient: message.recipient, message: compliantMessage };
+        const smsMessage: SMSMessage = { recipient: message.recipient, message: compliantMessage, userId: req.user.userId };
         return vendorService.sendSMS(smsMessage);
       });
       const settled2 = await Promise.allSettled(sendPromises2);
@@ -7381,7 +7876,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
   });
   app.post("/api/web/sms/send-bulk", authenticateToken, checkMaintenanceMode, async (req: any, res) => {
     try {
-      if (!canSendBulk()) return res.status(403).json(closedMessage());
+      if (!(await canSendBulk(req))) return res.status(403).json(closedMessage());
       const { recipients, message, userId, defaultDial, adminDirect, supervisorDirect } = req.body;
       
       // Check acting on behalf
@@ -7518,7 +8013,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
     };
 
     try {
-      if (!canSendBulk()) {
+      if (!(await canSendBulk(req))) {
         sendProgress({ type: 'error', error: 'Routes Closed' });
         return res.end();
       }
@@ -7679,7 +8174,7 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
 
   app.post("/api/web/sms/send-bulk-multi", authenticateToken, async (req: any, res) => {
     try {
-      if (!canSendBulk()) return res.status(403).json(closedMessage());
+      if (!(await canSendBulk(req))) return res.status(403).json(closedMessage());
       const { messages, userId, defaultDial, adminDirect, supervisorDirect } = req.body;
       
       if (userId && !['admin','supervisor'].includes(req.user.role)) {
@@ -8171,12 +8666,16 @@ app.delete("/api/v2/account/:userId", authenticateToken, requireRole(['admin','s
         await pool.end();
       } catch {}
       
+      // Check if this number has opted out (STOP keyword compliance)
+      const isOptedOut = await numberPoolManager.isOptedOut(phoneNumber);
+      
       res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
       res.set('Pragma', 'no-cache');
       res.set('Expires', '0');
       res.json({
         success: true,
         conversation,
+        isOptedOut,
         meta: {
           incomingCount: conversation?.incoming?.length || 0,
           outgoingCount: conversation?.outgoing?.length || 0,

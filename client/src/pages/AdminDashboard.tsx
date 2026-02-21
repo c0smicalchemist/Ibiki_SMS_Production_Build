@@ -133,6 +133,7 @@ export default function AdminDashboard() {
   });
   
   const [routeOverride, setRouteOverride] = useState<boolean>(false);
+  const [routeOverrideAllUsers, setRouteOverrideAllUsers] = useState<boolean>(false);
   const [routesOpen, setRoutesOpen] = useState<boolean>(true);
   const [countdown, setCountdown] = useState<number>(0);
 
@@ -145,6 +146,7 @@ export default function AdminDashboard() {
       setWebhookBusiness(config.config.admin_default_business_id || 'IBS_0');
       setSignupSeedExamples((config.config.signup_seed_examples || 'false') === 'true');
       setRouteOverride((config.config.routes_override_allow_single || 'false') === 'true');
+      setRouteOverrideAllUsers((config.config.routes_override_all_users || 'false') === 'true');
       // Compliance settings
       setComplianceSenderName(config.config.compliance_sender_name || '');
       setComplianceOptOutEnabled((config.config.compliance_optout_enabled || 'false') === 'true');
@@ -902,7 +904,20 @@ export default function AdminDashboard() {
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['/api/admin/config'] });
-      toast({ title: t('common.success'), description: 'Route override updated' });
+      toast({ title: t('common.success'), description: 'Admin/Supervisor route override updated' });
+    },
+    onError: (error: any) => {
+      toast({ title: t('common.error'), description: error?.message || 'Failed to update override', variant: 'destructive' });
+    }
+  });
+
+  const setRoutesOverrideAllUsersMutation = useMutation({
+    mutationFn: async (allow: boolean) => {
+      return await apiRequest('/api/admin/routes-override-all-users', { method: 'POST', body: JSON.stringify({ allow }) });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['/api/admin/config'] });
+      toast({ title: t('common.success'), description: 'All users route override updated' });
     },
     onError: (error: any) => {
       toast({ title: t('common.error'), description: error?.message || 'Failed to update override', variant: 'destructive' });
@@ -927,9 +942,9 @@ export default function AdminDashboard() {
           {profile?.user?.role === 'admin' && (
             <div className="ml-auto flex items-center gap-2">
               <Button variant="outline" onClick={() => inboxRetrieveMutation.mutate()} disabled={inboxRetrieveMutation.isPending}>
-                {inboxRetrieveMutation.isPending ? 'Retrieving…' : 'Retrieve Inbox Now'}
+                {inboxRetrieveMutation.isPending ? t('admin.loading') : t('inbox.retrieveNow')}
               </Button>
-              <Button variant="secondary" onClick={() => queryClient.invalidateQueries({ queryKey: ['/api/admin/webhook/status'] })}>Refresh Webhook Status</Button>
+              <Button variant="secondary" onClick={() => queryClient.invalidateQueries({ queryKey: ['/api/admin/webhook/status'] })}>{t('admin.refreshWebhookStatus')}</Button>
             </div>
           )}
         </div>
@@ -949,20 +964,20 @@ export default function AdminDashboard() {
           />
           <StatCard
             title={t('admin.stats.systemStatus')}
-            value={maintenanceMode ? 'Maintenance' : t('admin.stats.healthy')}
+            value={maintenanceMode ? t('admin.maintenance') : t('admin.stats.healthy')}
             icon={Settings}
-            description={maintenanceMode ? '🟠 System in maintenance mode' : `${vendorBalanceData?.vendorName ? `Vendor: ${vendorBalanceData.vendorName}` : 'No vendor'}${!isSupervisor && statsData?.restarts !== undefined ? ` • Restarts: ${statsData.restarts}` : ''}`}
+            description={maintenanceMode ? `🟠 ${t('admin.maintenanceMode')}` : `${vendorBalanceData?.vendorName ? `${t('admin.vendor')}: ${vendorBalanceData.vendorName}` : t('admin.noVendor')}${!isSupervisor && statsData?.restarts !== undefined ? ` • ${t('admin.restarts')}: ${statsData.restarts}` : ''}`}
           />
           <StatCard
-            title={'User'}
-            value={profileLoading ? 'Loading...' : (profileError ? 'Connection Error' : ((profile as any)?.user?.email || profile?.user?.id || 'Unknown'))}
+            title={t('admin.user')}
+            value={profileLoading ? t('admin.loading') : (profileError ? t('admin.connectionError') : ((profile as any)?.user?.email || profile?.user?.id || t('admin.unknown')))}
             icon={Users}
-            description={profileLoading ? 'Fetching profile...' : (profileError ? 'Retry needed' : `Logged in as ${(profile as any)?.user?.role || 'user'}`)}
+            description={profileLoading ? t('admin.fetchingProfile') : (profileError ? t('admin.retryNeeded') : `${t('admin.loggedInAs')} ${(profile as any)?.user?.role || 'user'}`)}
           />
           <Card className="md:col-span-2 lg:col-span-4">
             <CardContent className="p-6">
                 <div className="flex items-start justify-between">
-                  <p className="text-sm font-medium text-muted-foreground">Credits Overview</p>
+                  <p className="text-sm font-medium text-muted-foreground">{t('admin.creditsOverview')}</p>
                   <div className="flex items-center gap-2">
                     {profile?.user?.role === 'admin' && (
                       <Button
@@ -983,7 +998,7 @@ export default function AdminDashboard() {
                         }}
                         data-testid="button-reconcile"
                       >
-                        Reconcile
+                        {t('admin.reconcile')}
                       </Button>
                     )}
                     <div className="p-3 rounded-lg bg-primary/10"><Wallet className="w-5 h-5 text-primary" /></div>
@@ -991,36 +1006,36 @@ export default function AdminDashboard() {
                 </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mt-4">
                 <div>
-                  <p className="text-xs text-muted-foreground">{vendorBalanceData?.vendorName || 'Vendor'} Balance</p>
+                  <p className="text-xs text-muted-foreground">{vendorBalanceData?.vendorName || t('admin.vendor')} {t('admin.vendorBalance')}</p>
                   <p className="text-2xl font-bold tracking-tight mt-1">
                     {isSupervisor
-                      ? `${groupSupervisorCredits.toFixed(2)} credits`
-                      : (vendorBalanceLoading ? 'Loading...' : vendorBalanceData?.success ? (
+                      ? `${groupSupervisorCredits.toFixed(2)} ${t('admin.credits')}`
+                      : (vendorBalanceLoading ? t('admin.loading') : vendorBalanceData?.success ? (
                           vendorBalanceData.balance === -1 
-                            ? <span className="text-blue-600">Pay-per-use 💳</span>
-                            : `${vendorBalanceData.balance.toLocaleString()} credits`
+                            ? <span className="text-blue-600">{t('admin.payPerUse')} 💳</span>
+                            : `${vendorBalanceData.balance.toLocaleString()} ${t('admin.credits')}`
                         ) : (
-                          'Loading...'
+                          t('admin.loading')
                         ))}
                   </p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    {isSupervisor ? 'Pooled balance for supervisors in your group' : (
+                    {isSupervisor ? t('admin.pooledBalance') : (
                       vendorBalanceData?.balance === -1 
-                        ? 'Prepaid credit - charged per SMS' 
-                        : `Current ${vendorBalanceData?.vendorName || 'vendor'} balance`
+                        ? t('admin.prepaidCredit')
+                        : `${t('admin.currentBalance')} ${vendorBalanceData?.vendorName || t('admin.vendor')}`
                     )}
                   </p>
                   <p className="text-xs text-muted-foreground mt-1">
                     {vendorBalanceData?.balance === -1 
-                      ? 'Unlimited capacity (prepaid)' 
-                      : `SMS capacity: ${isSupervisor ? Math.floor(groupSupervisorCredits).toLocaleString() : (
+                      ? t('admin.unlimitedCapacity')
+                      : `${t('admin.smsCapacity')}: ${isSupervisor ? Math.floor(groupSupervisorCredits).toLocaleString() : (
                         vendorBalanceData?.success ? Math.floor(vendorBalanceData.balance).toLocaleString() : '0'
-                      )} messages`
+                      )} ${t('nav.messages')}`
                     }
                   </p>
                   {profile?.user?.role === 'admin' && !isSupervisor && (
                     <p className="text-xs text-blue-600 mt-1">
-                      Active: {vendorBalanceData?.vendorName || 'Loading...'}
+                      {t('admin.active')}: {vendorBalanceData?.vendorName || t('admin.loading')}
                     </p>
                   )}
                 </div>
@@ -1028,25 +1043,25 @@ export default function AdminDashboard() {
                 {(true) && (
                   <>
                     <div>
-                      <p className="text-xs text-muted-foreground">Allocated Credits</p>
+                      <p className="text-xs text-muted-foreground">{t('admin.allocatedCredits')}</p>
                       <p className={`text-2xl font-bold tracking-tight mt-1 ${isSupervisor ? 'text-green-600' : 'text-blue-600'}`}>
-                        {(isSupervisor ? groupClientCredits : sumCredits).toFixed(2)} credits
+                        {(isSupervisor ? groupClientCredits : sumCredits).toFixed(2)} {t('admin.credits')}
                       </p>
-                      <p className="text-xs text-muted-foreground mt-1">Sum of all client credits</p>
-                      <p className="text-xs text-muted-foreground mt-1">SMS capacity: {Math.floor(isSupervisor ? groupClientCredits : sumCredits).toLocaleString()} messages</p>
+                      <p className="text-xs text-muted-foreground mt-1">{t('admin.sumClientCredits')}</p>
+                      <p className="text-xs text-muted-foreground mt-1">{t('admin.smsCapacity')}: {Math.floor(isSupervisor ? groupClientCredits : sumCredits).toLocaleString()} {t('nav.messages')}</p>
                     </div>
                     <div>
-                      <p className="text-xs text-muted-foreground">Remaining Credits</p>
+                      <p className="text-xs text-muted-foreground">{t('admin.remainingCredits')}</p>
                       <p className={`text-2xl font-bold tracking-tight mt-1 ${
                         isSupervisor 
                           ? (groupRemainingCredits >= 0 ? 'text-green-600' : 'text-red-600') 
                           : (vendorBalanceData?.success && vendorBalanceData.balance >= sumCredits ? 'text-green-600' : 'text-red-600')
                       }`}>
                         {isSupervisor
-                          ? `${groupRemainingCredits.toFixed(2)} credits`
+                          ? `${groupRemainingCredits.toFixed(2)} ${t('admin.credits')}`
                           : (vendorBalanceData?.success 
-                              ? `${Math.max(vendorBalanceData.balance - sumCredits, 0).toFixed(2)} credits` 
-                              : '0.00 credits')}
+                              ? `${Math.max(vendorBalanceData.balance - sumCredits, 0).toFixed(2)} ${t('admin.credits')}` 
+                              : `0.00 ${t('admin.credits')}`)}
                       </p>
                       <p className={`text-xs mt-1 ${
                         isSupervisor 
@@ -1054,23 +1069,23 @@ export default function AdminDashboard() {
                           : (vendorBalanceData?.success && Math.abs((vendorBalanceData.balance - sumCredits)) <= 0.01 ? 'text-green-700' : 'text-red-700')
                       }`}>
                         {isSupervisor 
-                          ? 'Supervisor pooled minus allocated (group)' 
+                          ? t('admin.supervisorPooled')
                           : (vendorBalanceData?.vendor === 'extremesms' 
-                              ? (extremeBalance !== null && Math.abs((extremeBalance - sumCredits)) <= 0.01 ? 'In Sync' : 'Needs Reconcile')
-                              : 'Vendor Balance - Allocated')}
+                              ? (extremeBalance !== null && Math.abs((extremeBalance - sumCredits)) <= 0.01 ? t('admin.inSync') : t('admin.needsReconcile'))
+                              : t('admin.vendorMinusAllocated'))}
                       </p>
                       <p className="text-xs text-muted-foreground mt-1">
-                        SMS capacity: {isSupervisor 
+                        {t('admin.smsCapacity')}: {isSupervisor 
                           ? Math.floor(groupRemainingCredits).toLocaleString() 
                           : (vendorBalanceData?.success 
                               ? Math.floor(Math.max(vendorBalanceData.balance - sumCredits, 0)).toLocaleString() 
-                              : '0')} messages
+                              : '0')} {t('nav.messages')}
                       </p>
                     </div>
                   </>
                 )}
               </div>
-              <div className="mt-3 p-3 rounded border bg-muted/40 text-xs text-muted-foreground">1 credit = 1 SMS. Capacity is based on credits only.</div>
+              <div className="mt-3 p-3 rounded border bg-muted/40 text-xs text-muted-foreground">{t('credits.note')}</div>
               </CardContent>
             </Card>
           </div>
@@ -1120,7 +1135,7 @@ export default function AdminDashboard() {
                   </div>
                 </div>
                 <CardDescription>
-                  View and reply to incoming messages
+                  {t('inbox.viewAndReply')}
                 </CardDescription>
               </CardHeader>
             </Link>
@@ -1130,10 +1145,10 @@ export default function AdminDashboard() {
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <Users className="h-5 w-5" />
-                  Contacts
+                  {t('nav.contacts')}
                 </CardTitle>
                 <CardDescription>
-                  Manage your contact list
+                  {t('nav.contacts.description')}
                 </CardDescription>
               </CardHeader>
             </Link>
@@ -1143,10 +1158,10 @@ export default function AdminDashboard() {
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <Clock className="h-5 w-5" />
-                  Message History
+                  {t('nav.messageHistory')}
                 </CardTitle>
                 <CardDescription>
-                  Track delivery status and history
+                  {t('nav.messageHistory.description')}
                 </CardDescription>
               </CardHeader>
             </Link>
@@ -2096,29 +2111,6 @@ export default function AdminDashboard() {
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="routesOverride">Route Override: allow single SMS when closed (Admin/Supervisor)</Label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      id="routesOverride"
-                      type="checkbox"
-                      checked={routeOverride}
-                      onChange={(e) => setRouteOverride(e.target.checked)}
-                    />
-                    <span className="text-xs text-muted-foreground">Use for quick testing when routes are closed; applies only to single SMS</span>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setRoutesOverrideMutation.mutate(routeOverride)}
-                      disabled={setRoutesOverrideMutation.isPending}
-                      data-testid="button-save-route-override"
-                    >
-                      {setRoutesOverrideMutation.isPending ? 'Saving…' : 'Save Route Override'}
-                    </Button>
-                  </div>
-                </div>
-
                 {profile?.user?.role === 'admin' && (
                   <div className="border-t pt-6 space-y-4">
                     <h3 className="text-lg font-semibold">Pricing Configuration</h3>
@@ -2887,27 +2879,78 @@ export default function AdminDashboard() {
           <Card>
             <CardHeader>
               <CardTitle>Route Override</CardTitle>
-              <CardDescription>Allow single SMS send when routes are closed</CardDescription>
+              <CardDescription>Allow SMS sending when routes are closed</CardDescription>
             </CardHeader>
-            <CardContent>
-              <div className="flex items-center gap-2">
-                <input
-                  id="routesOverrideSupervisor"
-                  type="checkbox"
-                  checked={routeOverride}
-                  onChange={(e) => setRouteOverride(e.target.checked)}
-                />
-                <span className="text-xs text-muted-foreground">Use for quick testing; applies only to single SMS</span>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setRoutesOverrideMutation.mutate(routeOverride)}
-                  disabled={setRoutesOverrideMutation.isPending}
-                  data-testid="button-save-route-override"
-                >
-                  {setRoutesOverrideMutation.isPending ? 'Saving…' : 'Save Route Override'}
-                </Button>
+            <CardContent className="space-y-6">
+              {/* Admin/Supervisor Single SMS Override */}
+              <div className="space-y-3 p-4 border rounded-lg">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="font-medium">Admin/Supervisor Single SMS Override</h4>
+                    <p className="text-xs text-muted-foreground">
+                      Allow Admin and Supervisor roles to send single SMS when routes are closed (for quick testing)
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <input
+                      id="routesOverrideAdminSupervisor"
+                      type="checkbox"
+                      checked={routeOverride}
+                      onChange={(e) => setRouteOverride(e.target.checked)}
+                      className="h-4 w-4"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setRoutesOverrideMutation.mutate(routeOverride)}
+                      disabled={setRoutesOverrideMutation.isPending}
+                      data-testid="button-save-route-override"
+                    >
+                      {setRoutesOverrideMutation.isPending ? 'Saving…' : 'Save'}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              {/* All Users Override */}
+              <div className="space-y-3 p-4 border rounded-lg">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="font-medium">All Users Override (Single & Bulk)</h4>
+                    <p className="text-xs text-muted-foreground">
+                      Allow ALL users to send single and bulk SMS when routes are closed (for user account testing)
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <input
+                      id="routesOverrideAllUsers"
+                      type="checkbox"
+                      checked={routeOverrideAllUsers}
+                      onChange={(e) => setRouteOverrideAllUsers(e.target.checked)}
+                      className="h-4 w-4"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setRoutesOverrideAllUsersMutation.mutate(routeOverrideAllUsers)}
+                      disabled={setRoutesOverrideAllUsersMutation.isPending}
+                      data-testid="button-save-route-override-all-users"
+                    >
+                      {setRoutesOverrideAllUsersMutation.isPending ? 'Saving…' : 'Save'}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Status Indicator */}
+              <div className="p-3 bg-muted/50 rounded-lg text-sm">
+                <p className="font-medium mb-1">Current Status:</p>
+                <ul className="list-disc list-inside text-muted-foreground space-y-1">
+                  <li>Admin/Supervisor single SMS: {routeOverride ? <span className="text-green-600 font-medium">Enabled</span> : <span className="text-red-600">Disabled</span>}</li>
+                  <li>All users (single & bulk): {routeOverrideAllUsers ? <span className="text-green-600 font-medium">Enabled</span> : <span className="text-red-600">Disabled</span>}</li>
+                </ul>
               </div>
             </CardContent>
           </Card>

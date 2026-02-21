@@ -478,8 +478,18 @@ export default function Inbox() {
                         const latestInboundTime = new Date((latest as any).timestamp || (latest as any).createdAt).getTime();
                         const latestOutboundTime = outboundToPhone ? new Date(outboundToPhone.createdAt).getTime() : 0;
                         
+                        // Extract message content from outbound log's requestPayload
+                        const getOutboundMessage = (log: any): string => {
+                          try {
+                            const payload = typeof log?.requestPayload === 'string' ? JSON.parse(log.requestPayload) : log?.requestPayload;
+                            return payload?.message || payload?.messages?.[0]?.message || '';
+                          } catch {
+                            return '';
+                          }
+                        };
+                        
                         const mostRecentMessage = latestOutboundTime > latestInboundTime && outboundToPhone
-                          ? { message: outboundToPhone.message, timestamp: outboundToPhone.createdAt, isOutbound: true }
+                          ? { message: getOutboundMessage(outboundToPhone), timestamp: outboundToPhone.createdAt, isOutbound: true }
                           : { message: (latest as any).message, timestamp: (latest as any).timestamp || (latest as any).createdAt, isOutbound: false };
                         
                         const dt = new Date(mostRecentMessage.timestamp);

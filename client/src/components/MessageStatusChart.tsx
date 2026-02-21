@@ -3,7 +3,7 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, BarChart, Bar, XAxis
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { Button } from "@/components/ui/button";
-import { PieChartIcon, BarChart3 } from "lucide-react";
+import { PieChartIcon, BarChart3, Calendar, History } from "lucide-react";
 import { useState } from "react";
 
 interface MessageStatusChartProps {
@@ -20,6 +20,7 @@ const STATUS_COLORS = {
 export function MessageStatusChart({ userId }: MessageStatusChartProps) {
   const { t } = useLanguage();
   const [viewMode, setViewMode] = useState<'pie' | 'bar'>('pie');
+  const [timeRange, setTimeRange] = useState<'allTime' | 'today'>('allTime');
 
   // Fetch outbound message stats
   const { data: statsData } = useQuery({
@@ -53,29 +54,47 @@ export function MessageStatusChart({ userId }: MessageStatusChartProps) {
   // Calculate unique replied count - unique phone numbers that have replied
   const inboxMessages = (inboxData?.messages || []).map((i: any) => i?.from || '');
   const uniqueReplies = new Set(inboxMessages.map((f: string) => f.replace(/\D/g, ''))).size;
+  
+  // Calculate today's unique replies (messages received today)
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayInboxMessages = (inboxData?.messages || []).filter((i: any) => {
+    const ts = new Date(i?.timestamp || i?.createdAt);
+    return ts >= today;
+  });
+  const todayUniqueReplies = new Set(todayInboxMessages.map((i: any) => (i?.from || '').replace(/\D/g, ''))).size;
 
-  const stats = statsData?.stats || { sent: 0, delivered: 0, failed: 0 };
+  // All-time stats
+  const allTimeStats = statsData?.stats || { sent: 0, delivered: 0, failed: 0 };
+  
+  // Today's stats from API
+  const todayStats = statsData?.stats?.todayStats || { sent: 0, delivered: 0, failed: 0 };
+  
+  // Select stats based on time range
+  const stats = timeRange === 'today' ? todayStats : allTimeStats;
+  const repliesCount = timeRange === 'today' ? todayUniqueReplies : uniqueReplies;
+  
   const totalOutbound = stats.sent + stats.delivered + stats.failed;
-  const total = totalOutbound + uniqueReplies;
+  const total = totalOutbound + repliesCount;
 
   const pieData = [
-    { name: "Delivered", value: stats.delivered, color: STATUS_COLORS.delivered },
-    { name: "Sent", value: stats.sent, color: STATUS_COLORS.sent },
-    { name: "Replied", value: uniqueReplies, color: STATUS_COLORS.replied },
-    { name: "Failed", value: stats.failed, color: STATUS_COLORS.failed },
+    { name: t('chart.delivered'), value: stats.delivered, color: STATUS_COLORS.delivered },
+    { name: t('chart.sent'), value: stats.sent, color: STATUS_COLORS.sent },
+    { name: t('chart.replied'), value: repliesCount, color: STATUS_COLORS.replied },
+    { name: t('chart.failed'), value: stats.failed, color: STATUS_COLORS.failed },
   ].filter(item => item.value > 0);
 
   // Bar chart data (for comparison view)
   const barData = [
-    { category: 'Delivered', count: stats.delivered, fill: STATUS_COLORS.delivered },
-    { category: 'Sent', count: stats.sent, fill: STATUS_COLORS.sent },
-    { category: 'Replied', count: uniqueReplies, fill: STATUS_COLORS.replied },
-    { category: 'Failed', count: stats.failed, fill: STATUS_COLORS.failed },
+    { category: t('chart.delivered'), count: stats.delivered, fill: STATUS_COLORS.delivered },
+    { category: t('chart.sent'), count: stats.sent, fill: STATUS_COLORS.sent },
+    { category: t('chart.replied'), count: repliesCount, fill: STATUS_COLORS.replied },
+    { category: t('chart.failed'), count: stats.failed, fill: STATUS_COLORS.failed },
   ];
 
   // If no data, show a placeholder
   if (total === 0) {
-    pieData.push({ name: "No Data", value: 1, color: "#e5e7eb" });
+    pieData.push({ name: t('chart.noData'), value: 1, color: "#e5e7eb" });
   }
 
   const getPercentage = (value: number) => {
@@ -86,8 +105,32 @@ export function MessageStatusChart({ userId }: MessageStatusChartProps) {
   return (
     <Card className="flex flex-col border border-border/60 shadow-sm" data-testid="card-message-status-chart">
       <CardHeader className="pb-2 flex flex-row items-center justify-between">
-        <CardTitle className="text-base font-medium">Message Status Overview</CardTitle>
+        <div className="flex items-center gap-2">
+          <CardTitle className="text-base font-medium">{t('chart.messageStatusOverview')}</CardTitle>
+          <span className="text-xs text-muted-foreground px-2 py-0.5 bg-muted rounded-full">
+            {timeRange === 'today' ? t('chart.today') : t('chart.allTime')}
+          </span>
+        </div>
         <div className="flex gap-1">
+          <Button
+            variant={timeRange === 'allTime' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => setTimeRange('allTime')}
+            className="h-7 px-2"
+            title={t('chart.allTime')}
+          >
+            <History className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant={timeRange === 'today' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => setTimeRange('today')}
+            className="h-7 px-2"
+            title={t('chart.today')}
+          >
+            <Calendar className="h-3.5 w-3.5" />
+          </Button>
+          <div className="w-px h-6 bg-border mx-1" />
           <Button
             variant={viewMode === 'pie' ? 'default' : 'outline'}
             size="sm"
@@ -212,7 +255,7 @@ export function MessageStatusChart({ userId }: MessageStatusChartProps) {
                     dominantBaseline="middle"
                     className="text-xs fill-muted-foreground"
                   >
-                    Total
+                    {t('chart.total')}
                   </text>
                 </PieChart>
               </ResponsiveContainer>
@@ -233,7 +276,7 @@ export function MessageStatusChart({ userId }: MessageStatusChartProps) {
                   ))}
                 </div>
               ) : (
-                <div className="text-xs text-muted-foreground">No data</div>
+                <div className="text-xs text-muted-foreground">{t('chart.noData')}</div>
               )}
             </div>
           </div>
@@ -261,7 +304,7 @@ export function MessageStatusChart({ userId }: MessageStatusChartProps) {
                         <div className="bg-card border rounded-lg p-2 shadow-lg">
                           <p className="text-sm font-medium">{data.category}</p>
                           <p className="text-sm" style={{ color: data.fill }}>
-                            {data.count.toLocaleString()} messages
+                            {data.count.toLocaleString()} {t('chart.messages')}
                           </p>
                         </div>
                       );

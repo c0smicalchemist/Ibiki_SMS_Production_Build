@@ -25,6 +25,12 @@ export default function ClientDashboard() {
     queryKey: ['/api/client/profile']
   });
 
+  // Use the same balance API as the header to ensure consistency
+  const { data: balanceData } = useQuery<{ success: boolean; balance: number; currency: string }>({ 
+    queryKey: ['/api/web/account/balance'],
+    staleTime: 0,
+  });
+
   const { data: messages } = useQuery<{ success: boolean; messages: any[] }>({
     queryKey: ['/api/client/messages']
   });
@@ -40,6 +46,8 @@ export default function ClientDashboard() {
   });
 
   const credits = profile?.credits || "0.00";
+  // Use balance from dedicated balance API (same as header) for consistency
+  const displayBalance = typeof balanceData?.balance === 'number' ? balanceData.balance : parseFloat(credits);
   const ratePerSms = profile?.ratePerSms || "0.02";
   const messageCount = messages?.messages?.length || 0;
   const inboxCount = (webInbox?.messages?.length || webInbox?.count || 0) as number;
@@ -65,7 +73,7 @@ export default function ClientDashboard() {
       <DashboardHeader />
       <div className="p-6 space-y-8">
         <div className="rounded border p-3 bg-muted/40">
-          <p className="text-xs text-muted-foreground">SMS capacity: {Math.floor(parseFloat(credits)).toLocaleString()} messages</p>
+          <p className="text-xs text-muted-foreground">SMS capacity: {Math.floor(displayBalance).toLocaleString()} messages</p>
         </div>
         <div className="flex items-center gap-4">
           <div>
@@ -84,7 +92,7 @@ export default function ClientDashboard() {
             icon={MessageSquare}
             description={t('dashboard.stats.allTime')}
           />
-          <StatCard title={t('dashboard.stats.credits')} value={`${parseFloat(credits).toFixed(2)}`} icon={DollarSign} description={t('dashboard.stats.balance')} />
+          <StatCard title={t('dashboard.stats.credits')} value={`${displayBalance.toFixed(2)}`} icon={DollarSign} description={t('dashboard.stats.balance')} />
           <StatCard
             title={t('dashboard.stats.status')}
             value={maintenanceData?.enabled ? 'Maintenance' : t('dashboard.stats.online')}
